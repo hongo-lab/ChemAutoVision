@@ -158,6 +158,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    set_seeds(99)
+
     task_name = args.task_name
     batch_size = int(args.batch_size) if args.batch_size else None 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu

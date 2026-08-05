@@ -10,7 +10,6 @@ from rdkit import Chem
 from rdkit.Chem import Draw
 from tensorflow.keras.utils import img_to_array
 
-from seed import set_seeds
 from settings import IMG_SIZE, IS_DOWNSCALE_BEFORE_DAUG
 
 
@@ -31,7 +30,6 @@ def create_cls_image_data(
     img_size: tuple[int, int],
 ) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
 
-    set_seeds(99)
     _df = pd.read_pickle(data_path)
     smiles_column = "smiles"
 

@@ -125,10 +125,6 @@ def create_callbacks():
     return callbacks
 
 if __name__ == "__main__":
-    set_seeds(42)
-    print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
-    gpu_names = list_gpu_names()
-    print(gpu_names)
     parser = argparse.ArgumentParser(description="experiment")
     parser.add_argument("--task_name", type=str, help="the task name")
     parser.add_argument("--batch_size", type=int, help="batch_size")
@@ -153,6 +149,13 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    set_seeds(42)
+
+    print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
+    gpu_names = list_gpu_names()
+    print(gpu_names)
+
     task_name = args.task_name
     batch_size = int(args.batch_size)
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
