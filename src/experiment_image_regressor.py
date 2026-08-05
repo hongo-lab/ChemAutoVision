@@ -242,7 +242,10 @@ if __name__ == "__main__":
             )
             tuner = BayesianOptimization(
                         lambda hp: build_model_for_kerastuner(hp, args.execute_data_aug),
-                        objective=LOSS,
+                        objective=Objective(
+                            "val_mean_squared_error",
+                            direction="min",
+                        ),
                         max_trials=args.max_trials,
                         executions_per_trial=1,
                         directory=f"keras_tuner/{task_name}_seed{args.seed}_{split_run_name}",
