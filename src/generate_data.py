@@ -11,7 +11,6 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 from sklearn.model_selection import train_test_split
 
 from data.images import padding_image, smi_to_img
-from seed import set_seeds
 from settings import IMG_SIZE, IS_DOWNSCALE_BEFORE_DAUG
 from utils.split import BALANCED_SCAFFOLD_SPLIT_TYPE, make_split_prefix
 
@@ -24,7 +23,6 @@ CLASSIFICATION_TASKS = {"BBBP", "hERG", "P-gp", "CYP3A4"}
 def _generate_image(
     _df_row: pd.Series, task_name: str, split_prefix: str = ""
 ) -> pd.Series:
-    set_seeds(99)
 
     if task_name in ["london", "lz", "dm"]:
         img_dir = "qm"
