@@ -75,8 +75,9 @@ def run_training_with_early_stopping(
             args=args,
             features_path=args.separate_test_features_path,
             atom_descriptors_path=args.separate_test_atom_descriptors_path,
-            bond_features_path=args.separate_test_bond_features_path,
+            bond_descriptors_path=args.separate_test_bond_descriptors_path,
             phase_features_path=args.separate_test_phase_features_path,
+            constraints_path=args.separate_test_constraints_path,
             smiles_columns=args.smiles_columns,
             loss_function=args.loss_function,
             logger=logger,
@@ -87,8 +88,9 @@ def run_training_with_early_stopping(
             args=args,
             features_path=args.separate_val_features_path,
             atom_descriptors_path=args.separate_val_atom_descriptors_path,
-            bond_features_path=args.separate_val_bond_features_path,
+            bond_descriptors_path=args.separate_val_bond_descriptors_path,
             phase_features_path=args.separate_val_phase_features_path,
+            constraints_path=args.separate_val_constraints_path,
             smiles_columns=args.smiles_columns,
             loss_function=args.loss_function,
             logger=logger,
@@ -146,6 +148,7 @@ def run_training_with_early_stopping(
             save_dir=args.save_dir,
             task_names=args.task_names,
             features_path=args.features_path,
+            constraints_path=args.constraints_path,
             train_data=train_data,
             val_data=val_data,
             test_data=test_data,
@@ -173,14 +176,18 @@ def run_training_with_early_stopping(
     else:
         atom_descriptor_scaler = None
 
-    if args.bond_feature_scaling and args.bond_features_size > 0:
-        bond_feature_scaler = train_data.normalize_features(
-            replace_nan_token=0, scale_bond_features=True
+    if args.bond_descriptor_scaling and args.bond_descriptors is not None:
+        bond_descriptor_scaler = train_data.normalize_features(
+            replace_nan_token=0, scale_bond_descriptors=True
         )
-        val_data.normalize_features(bond_feature_scaler, scale_bond_features=True)
-        test_data.normalize_features(bond_feature_scaler, scale_bond_features=True)
+        val_data.normalize_features(
+            bond_descriptor_scaler, scale_bond_descriptors=True
+        )
+        test_data.normalize_features(
+            bond_descriptor_scaler, scale_bond_descriptors=True
+        )
     else:
-        bond_feature_scaler = None
+        bond_descriptor_scaler = None
 
     args.train_data_size = len(train_data)
     debug(
@@ -195,7 +202,12 @@ def run_training_with_early_stopping(
 
     if args.dataset_type == "regression":
         debug("Fitting scaler")
-        scaler = train_data.normalize_targets()
+        if args.is_atom_bond_targets:
+            scaler = None
+            atom_bond_scaler = train_data.normalize_atom_bond_targets()
+        else:
+            scaler = train_data.normalize_targets()
+            atom_bond_scaler = None
         args.spectra_phase_mask = None
     elif args.dataset_type == "spectra":
         args.spectra_phase_mask = load_phase_mask(args.spectra_phase_mask_path)
@@ -209,9 +221,11 @@ def run_training_with_early_stopping(
             )
             dataset.set_targets(data_targets)
         scaler = None
+        atom_bond_scaler = None
     else:
         args.spectra_phase_mask = None
         scaler = None
+        atom_bond_scaler = None
 
     loss_func = get_loss_func(args)
     test_smiles, test_targets = test_data.smiles(), test_data.targets()
@@ -219,6 +233,12 @@ def run_training_with_early_stopping(
         sum_test_preds = np.zeros(
             (len(test_smiles), args.num_tasks, args.multiclass_num_classes)
         )
+    elif args.is_atom_bond_targets:
+        sum_test_preds = []
+        for targets_by_task in zip(*test_data.targets()):
+            targets_by_task = np.concatenate(targets_by_task)
+            sum_test_preds.append(np.zeros((targets_by_task.shape[0], 1)))
+        sum_test_preds = np.array(sum_test_preds, dtype=object)
     else:
         sum_test_preds = np.zeros((len(test_smiles), args.num_tasks))
 
@@ -289,7 +309,8 @@ def run_training_with_early_stopping(
             scaler,
             features_scaler,
             atom_descriptor_scaler,
-            bond_feature_scaler,
+            bond_descriptor_scaler,
+            atom_bond_scaler,
             args,
         )
         optimizer = build_optimizer(model, args)
@@ -311,6 +332,7 @@ def run_training_with_early_stopping(
                 scheduler=scheduler,
                 args=args,
                 n_iter=n_iter,
+                atom_bond_scaler=atom_bond_scaler,
                 logger=logger,
                 writer=writer,
             )
@@ -324,6 +346,7 @@ def run_training_with_early_stopping(
                 metrics=args.metrics,
                 dataset_type=args.dataset_type,
                 scaler=scaler,
+                atom_bond_scaler=atom_bond_scaler,
                 logger=logger,
             )
             for metric, scores in val_scores.items():
@@ -347,7 +370,8 @@ def run_training_with_early_stopping(
                     scaler,
                     features_scaler,
                     atom_descriptor_scaler,
-                    bond_feature_scaler,
+                    bond_descriptor_scaler,
+                    atom_bond_scaler,
                     args,
                 )
 
@@ -397,7 +421,10 @@ def run_training_with_early_stopping(
             info(f"Model {model_idx} provided with no test set; skipping test evaluation.")
         else:
             test_preds = predict(
-                model=model, data_loader=test_data_loader, scaler=scaler
+                model=model,
+                data_loader=test_data_loader,
+                scaler=scaler,
+                atom_bond_scaler=atom_bond_scaler,
             )
             test_scores = evaluate_predictions(
                 preds=test_preds,
@@ -405,12 +432,16 @@ def run_training_with_early_stopping(
                 num_tasks=args.num_tasks,
                 metrics=args.metrics,
                 dataset_type=args.dataset_type,
+                is_atom_bond_targets=args.is_atom_bond_targets,
                 gt_targets=test_data.gt_targets(),
                 lt_targets=test_data.lt_targets(),
                 logger=logger,
             )
             if len(test_preds) != 0:
-                sum_test_preds += np.array(test_preds)
+                if args.is_atom_bond_targets:
+                    sum_test_preds += np.array(test_preds, dtype=object)
+                else:
+                    sum_test_preds += np.array(test_preds)
             for metric, scores in test_scores.items():
                 avg_test_score = np.nanmean(scores)
                 info(f"Model {model_idx} test {metric} = {avg_test_score:.6f}")
@@ -437,6 +468,7 @@ def run_training_with_early_stopping(
             num_tasks=args.num_tasks,
             metrics=args.metrics,
             dataset_type=args.dataset_type,
+            is_atom_bond_targets=args.is_atom_bond_targets,
             gt_targets=test_data.gt_targets(),
             lt_targets=test_data.lt_targets(),
             logger=logger,
