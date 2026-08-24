@@ -84,6 +84,21 @@ The images are written to a separate directory because the image file names are 
 
 When training a model on a balanced-scaffold dataset, pass the same `--split_type balanced_scaffold --split_seed 1` to the training scripts so that they load the corresponding dataset. Some scaffold distributions can make a requested fold empty; data generation fails early in that case instead of creating an unusable dataset. Seed `1` has been validated for FreeSolv.
 
+`experiment_graph.py` accepts the same options. Its hyperparameter search,
+training, prediction, and evaluation all use the selected train/val/test CSVs:
+
+```
+python3 experiment_graph.py [other options] --split_type balanced_scaffold --split_seed 1
+```
+
+When `--atom_descriptors_path` is used, every train/val/test descriptor pkl must
+have a corresponding `*.meta.json` provenance sidecar. Feature-generation code
+must call `utils.atom_descriptor_metadata.write_atom_descriptor_metadata()`
+immediately after writing each final pkl. The graph experiment verifies the
+split method and seed, subset, CSV name, molecule count, ordered-SMILES hash,
+and descriptor-file hash before hyperparameter optimization starts. Missing or
+legacy metadata is rejected rather than allowing an unverified experiment.
+
 The datasets for CYP3A4 inhibition, hERG inhibition, and P-gp substrate prediction were obtained from [Han et al.](https://doi.org/10.1021/acs.jcim.4c02122). In the original study, the files labeled `valid` were used as external validation datasets. Therefore, these external datasets were excluded from the data used for model training and evaluation in this study. For each task, the corresponding `train` and `test` files were concatenated and used as the source dataset.
 
 # Model training
