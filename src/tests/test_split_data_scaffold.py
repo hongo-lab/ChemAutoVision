@@ -18,7 +18,7 @@ from generate_data import (
     _split_data_balanced_scaffold,
     _validate_split,
 )
-from utils.split import make_split_prefix, split_method_name
+from utils.split import make_split_csv_paths, make_split_prefix, split_method_name
 
 # 同一骨格を複数持つグループと、非環分子（空 scaffold）を混在させた 24 件。
 SMILES = [
@@ -213,6 +213,20 @@ class TestArtifactNaming:
     def test_scaffold_seed_is_required(self):
         with pytest.raises(ValueError, match="--split_seed is required"):
             make_split_prefix("balanced_scaffold", None)
+
+    def test_graph_csv_paths_follow_split_naming(self):
+        paths = make_split_csv_paths(
+            "../data", "BBBP", "balanced_scaffold", 42
+        )
+        assert paths["train"] == Path(
+            "../data/train_balanced_scaffold_seed42_BBBP_img.csv"
+        )
+        assert paths["val"] == Path(
+            "../data/val_balanced_scaffold_seed42_BBBP_img.csv"
+        )
+        assert paths["test"] == Path(
+            "../data/test_balanced_scaffold_seed42_BBBP_img.csv"
+        )
 
 
 class TestRepositoryDatasets:

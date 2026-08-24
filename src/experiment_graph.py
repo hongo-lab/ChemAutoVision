@@ -31,6 +31,15 @@ from recording.record_mlflow import record_exp_result
 from training.graph_training import run_training_with_early_stopping
 from training.early_stopping import get_best_checkpoint_path
 from training.chemprop_checkpoint_compat import trusted_chemprop_checkpoint_loading
+from utils.atom_descriptor_metadata import (
+    atom_descriptor_metadata_path,
+    validate_atom_descriptor_metadata,
+)
+from utils.split import (
+    BALANCED_SCAFFOLD_SPLIT_TYPE,
+    make_split_csv_paths,
+    split_method_name,
+)
 
 if __name__ == "__main__":
     if torch.cuda.is_available():
@@ -51,6 +60,18 @@ if __name__ == "__main__":
     )
     parser.add_argument("--gpu", type=str, help="gpu")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
+    parser.add_argument(
+        "--split_type",
+        choices=["random", BALANCED_SCAFFOLD_SPLIT_TYPE],
+        default="random",
+        help="data split strategy (generate_data.py と一致させる)",
+    )
+    parser.add_argument(
+        "--split_seed",
+        type=int,
+        default=None,
+        help="seed for balanced scaffold assignment (required for balanced_scaffold)",
+    )
     parser.add_argument("--atom_descriptors_path", type=str, default=None,
                         help="train 用の原子特徴量 pkl パス（generate_cam_graph_features.py の出力）")
     parser.add_argument("--atom_descriptors", type=str, default="feature",
@@ -76,6 +97,25 @@ if __name__ == "__main__":
 
     task_name = args.task_name
     base_task_name = task_name[2:] if task_name[:2] in ("t_", "q_") else task_name
+    try:
+        split_csv_paths = make_split_csv_paths(
+            "../data", task_name, args.split_type, args.split_seed
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    for subset, csv_path in split_csv_paths.items():
+        if not csv_path.is_file():
+            parser.error(f"{subset} split CSV not found: {csv_path}")
+    split_method = split_method_name(args.split_type)
+    split_run_name = (
+        f"{split_method}_s{args.split_seed}"
+        if args.split_type == BALANCED_SCAFFOLD_SPLIT_TYPE
+        else split_method
+    )
+    train_data_path = str(split_csv_paths["train"])
+    val_data_path = str(split_csv_paths["val"])
+    test_data_path = str(split_csv_paths["test"])
+
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
     selected_gpu_indices = list(map(int, args.gpu.split(",")))
@@ -84,7 +124,7 @@ if __name__ == "__main__":
     print(selected_gpu_names)
 
     # hyper parameter tuning
-    hp_save_dir = f"./graph_hyperopt/hp/dmpnn_{task_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    hp_save_dir = f"./graph_hyperopt/hp/dmpnn_{task_name}_{split_run_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     config_save_path = f"./{hp_save_dir}/{task_name}_b{args.batch_size}_dmpnn_best_hp_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
 
     # atom_descriptors_path が指定された場合、_train/_val/_test のパスを導出する
@@ -92,20 +132,42 @@ if __name__ == "__main__":
     atom_desc_train_path = args.atom_descriptors_path
     atom_desc_val_path = None
     atom_desc_test_path = None
+    atom_desc_metadata = {}
     if atom_desc_train_path is not None:
         if args.radius is not None:
             atom_desc_train_path = atom_desc_train_path.replace(
                 "_atom_desc_", f"_r{args.radius}_{args.aggregation}_atom_desc_"
             )
-        _base = atom_desc_train_path.replace("_train.pkl", "")
+        if not atom_desc_train_path.endswith("_train.pkl"):
+            parser.error("--atom_descriptors_path must end with _train.pkl")
+        _base = atom_desc_train_path.removesuffix("_train.pkl")
         atom_desc_val_path = f"{_base}_val.pkl"
         atom_desc_test_path = f"{_base}_test.pkl"
+        for subset, descriptor_path in {
+            "train": atom_desc_train_path,
+            "val": atom_desc_val_path,
+            "test": atom_desc_test_path,
+        }.items():
+            try:
+                atom_desc_metadata[subset] = validate_atom_descriptor_metadata(
+                    descriptor_path,
+                    split_csv_paths[subset],
+                    split_type=args.split_type,
+                    split_seed=args.split_seed,
+                    subset=subset,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                parser.error(str(exc))
+        print(
+            "Atom descriptor provenance verified for "
+            f"{split_run_name}: train/val/test"
+        )
 
     validation_metric = 'auc' if args.dataset_type == 'classification' else 'mse'
 
     hp_args = [
-        '--data_path', f"../data/train_{task_name}_img.csv",
-        '--separate_val_path', f"../data/val_{task_name}_img.csv",
+        '--data_path', train_data_path,
+        '--separate_val_path', val_data_path,
         '--dataset_type', args.dataset_type,
         '--metric', validation_metric,
         # '--features_generator', args.features_generator,
@@ -140,11 +202,11 @@ if __name__ == "__main__":
         chemprop_hyperopt_module.hyperopt(hyperopt_args)
 
     # training
-    model_save_dir = f"./graph_hyperopt/trained/dmpnn_{task_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}" 
+    model_save_dir = f"./graph_hyperopt/trained/dmpnn_{task_name}_{split_run_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     tr_args = [
-        '--data_path', f"../data/train_{task_name}_img.csv",
-        '--separate_val_path', f"../data/val_{task_name}_img.csv",
-        '--separate_test_path',f"../data/test_{task_name}_img.csv",
+        '--data_path', train_data_path,
+        '--separate_val_path', val_data_path,
+        '--separate_test_path', test_data_path,
         '--dataset_type', args.dataset_type,
         '--config_path', config_save_path,
         '--metric', validation_metric,
@@ -196,21 +258,21 @@ if __name__ == "__main__":
         set_extra_atom_fdim(train_args.atom_features_size)
 
     if atom_desc_train_path is not None:
-        import json as _json
         n_cam = train_args.atom_features_size if train_args.atom_descriptors == 'feature' else 0
-        meta_path = atom_desc_train_path.replace("_train.pkl", "_meta.json")
+        meta_path = atom_descriptor_metadata_path(atom_desc_train_path)
         if os.path.exists(meta_path):
-            with open(meta_path, encoding="utf-8") as f:
-                meta = _json.load(f)
-            if n_cam != meta["n_cam_features"]:
+            meta = atom_desc_metadata["train"]
+            if "n_cam_features" in meta and n_cam != meta["n_cam_features"]:
                 raise ValueError(
                     f"[atom features] 列数不一致: pkl から読み取った n_cam={n_cam}, "
                     f"meta.json の n_cam_features={meta['n_cam_features']}. "
                     f"pkl と meta.json が対応していない可能性があります。"
                 )
-            print(f"\n[atom features] total={meta['n_total_features']}  "
-                  f"(default={meta['n_total_features'] - n_cam}, cam={n_cam}, mode={train_args.atom_descriptors})")
-            print(f"  feature_names (last 5): {meta['feature_names'][-5:]}")
+            if "n_total_features" in meta:
+                print(f"\n[atom features] total={meta['n_total_features']}  "
+                      f"(default={meta['n_total_features'] - n_cam}, cam={n_cam}, mode={train_args.atom_descriptors})")
+            if "feature_names" in meta:
+                print(f"  feature_names (last 5): {meta['feature_names'][-5:]}")
         else:
             from data.graph_features import get_atom_feature_names
             default_names = get_atom_feature_names()
@@ -242,9 +304,9 @@ if __name__ == "__main__":
     # train_model(train_args)
 
     # predict
-    predict_output_path = f"{model_save_dir}/prediction_{task_name}.csv"
+    predict_output_path = f"{model_save_dir}/prediction_{task_name}_{split_run_name}.csv"
     predict_args_list = [
-        '--test_path', f"../data/test_{task_name}_img.csv",
+        '--test_path', test_data_path,
         '--checkpoint_dir', model_save_dir,
         '--preds_path', predict_output_path,
         # '--features_generator', args.features_generator,
@@ -262,7 +324,7 @@ if __name__ == "__main__":
 
     y_score = pd.read_csv(predict_output_path)[base_task_name]
     y_preds = np.where(y_score > 0.5, 1, 0)
-    y_test = pd.read_csv(f"../data/test_{task_name}_img.csv")[base_task_name]
+    y_test = pd.read_csv(test_data_path)[base_task_name]
 
     record_exp_result(
         '576013465360263177' if args.dataset_type == "regression" else '570837897253197098',
@@ -299,6 +361,13 @@ if __name__ == "__main__":
             "cam_aggregation": args.aggregation if atom_desc_train_path is not None else None,
             "cam_radius": args.radius if atom_desc_train_path is not None else None,
             "seed": args.seed,
+            "split_type": args.split_type,
+            "split_seed": args.split_seed
+            if args.split_type == BALANCED_SCAFFOLD_SPLIT_TYPE
+            else None,
+            "train_smiles_hash": atom_desc_metadata.get("train", {}).get("ordered_smiles_sha256"),
+            "val_smiles_hash": atom_desc_metadata.get("val", {}).get("ordered_smiles_sha256"),
+            "test_smiles_hash": atom_desc_metadata.get("test", {}).get("ordered_smiles_sha256"),
         },
         # tags
         {
