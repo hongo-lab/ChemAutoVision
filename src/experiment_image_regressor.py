@@ -171,6 +171,7 @@ if __name__ == "__main__":
         if args.split_type == BALANCED_SCAFFOLD_SPLIT_TYPE
         else split_method
     )
+    data_aug_suffix = "" if args.execute_data_aug else "_noaug"
     data_path = data_path.replace("../data/", f"../data/{split_prefix}")
 
     train_ds, val_ds, test_ds = create_regression_img_data(
@@ -181,7 +182,10 @@ if __name__ == "__main__":
     )
 
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-    save_model_path = f"../models/{task_name}_regression_{args.model_name}_{split_run_name}_{timestamp}.h5"
+    save_model_path = (
+        f"../models/{task_name}_regression_{args.model_name}_{split_run_name}"
+        f"{data_aug_suffix}_{timestamp}.h5"
+    )
     call_backs = create_callbacks()
     if args.model_name == "autokeras":
 
@@ -248,9 +252,12 @@ if __name__ == "__main__":
                         ),
                         max_trials=args.max_trials,
                         executions_per_trial=1,
-                        directory=f"keras_tuner/{task_name}_seed{args.seed}_{split_run_name}",
+                        directory=(
+                            f"keras_tuner/{task_name}_seed{args.seed}_"
+                            f"{split_run_name}{data_aug_suffix}"
+                        ),
                         project_name=f"{args.model_name}_bs{batch_size}_bayesian",
-                        overwrite=True,
+                        overwrite=False,
                         seed=args.seed
                     )
             tuner.search(
@@ -290,7 +297,10 @@ if __name__ == "__main__":
     training_time = time_training_end - time_training_start
     pred_time = time_pred_end - time_pred_start
 
-    result_csv_path = f"../results/{task_name}_regression_{args.model_name}_{split_run_name}_{timestamp}.csv"
+    result_csv_path = (
+        f"../results/{task_name}_regression_{args.model_name}_{split_run_name}"
+        f"{data_aug_suffix}_{timestamp}.csv"
+    )
     create_result_csv(result_csv_path, y_pred.flatten(), y_test)
 
     save_model(best_model, save_model_path)
