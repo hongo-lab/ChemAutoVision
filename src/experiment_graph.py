@@ -42,9 +42,15 @@ from utils.split import (
 )
 
 if __name__ == "__main__":
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     parser = argparse.ArgumentParser(description="experiment")
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA GPU is not available. Training has been stopped to prevent "
+            "an unintended CPU run.\n"
+            f"PyTorch version: {torch.__version__}\n"
+            f"PyTorch CUDA version: {torch.version.cuda}\n"
+            f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}"
+        )
     parser.add_argument("--task_name", type=str, help="the task name")
     parser.add_argument("--batch_size", type=str, help="batch_size")
     parser.add_argument("--num_iter", type=str, help="graph hyperopt iter num")
