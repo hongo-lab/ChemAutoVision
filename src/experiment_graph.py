@@ -27,6 +27,7 @@ import tensorflow as tf
 import torch
 from utils.utils import list_gpu_names
 import os
+from data.objectives import calc_weights_for_binary
 from recording.record_mlflow import record_exp_result
 from training.graph_training import run_training_with_early_stopping
 from training.early_stopping import get_best_checkpoint_path
@@ -85,7 +86,7 @@ if __name__ == "__main__":
                         help="原子特徴量の注入方法: feature=メッセージパッシング前, descriptor=readout後 (デフォルト: feature)")
     parser.add_argument("--radius", type=int, default=None,
                         help="CAM原子特徴量生成時のradius [px]。指定すると atom_descriptors_path 内の"
-                             "_atom_desc_ を _r{radius}_{aggregation}_atom_desc_ に置換して対応する pkl を使用する")
+                            "_atom_desc_ を _r{radius}_{aggregation}_atom_desc_ に置換して対応する pkl を使用する")
     parser.add_argument("--aggregation", type=str, default="mean",
                         choices=["mean", "max", "gaussian"],
                         help="CAM集計方法。--radius と合わせて使用（デフォルト: mean）")
@@ -171,6 +172,24 @@ if __name__ == "__main__":
 
     validation_metric = 'auc' if args.dataset_type == 'classification' else 'mse'
 
+    # 画像モデルと同じ calc_weights_for_binary でクラス重みを計算し、
+    # Chemprop には分子ごとの損失重み (--data_weights_path) として渡す。
+    class_weight = None
+    data_weights_path = None
+    if args.dataset_type == 'classification':
+        train_labels = pd.read_csv(train_data_path)[base_task_name].to_numpy()
+        label_ds = tf.data.Dataset.from_tensor_slices(
+            (np.zeros(len(train_labels)), train_labels)
+        )
+        class_weight = calc_weights_for_binary(label_ds)
+        os.makedirs(hp_save_dir, exist_ok=True)
+        # 重みは訓練データ（タスク×分割方法）だけで決まるので、それで一意にする。
+        data_weights_path = f"{hp_save_dir}/train_class_weights_{task_name}_{split_run_name}.csv"
+        pd.DataFrame(
+            {"weight": [class_weight[int(y)] for y in train_labels]}
+        ).to_csv(data_weights_path, index=False)
+        print(f"class_weight: {class_weight} -> {data_weights_path}")
+
     hp_args = [
         '--data_path', train_data_path,
         '--separate_val_path', val_data_path,
@@ -187,8 +206,8 @@ if __name__ == "__main__":
         '--gpu', args.gpu,
         '--seed', str(args.seed)
     ]
-    if args.dataset_type == 'classification':
-        hp_args.append('--class_balance')
+    if data_weights_path is not None:
+        hp_args += ['--data_weights_path', data_weights_path]
     if atom_desc_train_path is not None:
         hp_args += ['--atom_descriptors_path', atom_desc_train_path,
                     '--atom_descriptors', args.atom_descriptors,
@@ -226,8 +245,8 @@ if __name__ == "__main__":
         '--gpu', args.gpu,
         '--seed', str(args.seed)
     ]
-    if args.dataset_type == 'classification':
-        tr_args.append('--class_balance')
+    if data_weights_path is not None:
+        tr_args += ['--data_weights_path', data_weights_path]
     if atom_desc_train_path is not None:
         tr_args += ['--atom_descriptors_path', atom_desc_train_path,
                     '--atom_descriptors', args.atom_descriptors,
@@ -239,6 +258,7 @@ if __name__ == "__main__":
         smiles_columns=train_args.smiles_columns,
         target_columns=train_args.target_columns,
         atom_descriptors_path=atom_desc_train_path,
+        data_weights_path=train_args.data_weights_path,
         args=train_args
     )
 
@@ -276,14 +296,14 @@ if __name__ == "__main__":
                 )
             if "n_total_features" in meta:
                 print(f"\n[atom features] total={meta['n_total_features']}  "
-                      f"(default={meta['n_total_features'] - n_cam}, cam={n_cam}, mode={train_args.atom_descriptors})")
+                    f"(default={meta['n_total_features'] - n_cam}, cam={n_cam}, mode={train_args.atom_descriptors})")
             if "feature_names" in meta:
                 print(f"  feature_names (last 5): {meta['feature_names'][-5:]}")
         else:
             from data.graph_features import get_atom_feature_names
             default_names = get_atom_feature_names()
             print(f"\n[atom features] total={len(default_names) + n_cam}  "
-                  f"(default={len(default_names)}, cam={n_cam}, mode={train_args.atom_descriptors})")
+                f"(default={len(default_names)}, cam={n_cam}, mode={train_args.atom_descriptors})")
             print(f"  default (last 3): {default_names[-3:]}")
             if n_cam > 0:
                 print(f"  CAM descriptors : {n_cam} column(s) from {atom_desc_train_path}")
@@ -322,7 +342,7 @@ if __name__ == "__main__":
     ]
     if atom_desc_test_path is not None:
         predict_args_list += ['--atom_descriptors_path', atom_desc_test_path,
-                              '--atom_descriptors', args.atom_descriptors]
+                            '--atom_descriptors', args.atom_descriptors]
     predict_args = PredictArgs().parse_args(predict_args_list)
 
     with trusted_chemprop_checkpoint_loading():
@@ -360,6 +380,9 @@ if __name__ == "__main__":
             "stopped_early": train_args.early_stopping_results[0]["stopped_early"],
             "num_iters": args.num_iter,
             "batch_size": args.batch_size,
+            "class_weight": f"0:{class_weight[0]}, 1:{class_weight[1]}"
+            if class_weight is not None
+            else None,
             "features_generator": None if not hasattr(args, 'features_generator') else args.features_generator,
             "features_size": None if not hasattr(args, 'features_size') else args.features_size,
             "atom_descriptors_path": atom_desc_train_path,
