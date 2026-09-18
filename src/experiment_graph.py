@@ -24,6 +24,7 @@ from sklearn.metrics import (
     r2_score
 )
 import tensorflow as tf
+tf.config.set_visible_devices([], "GPU")
 import torch
 from utils.utils import list_gpu_names
 import os
