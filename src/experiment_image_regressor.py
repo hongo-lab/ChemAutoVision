@@ -174,7 +174,7 @@ if __name__ == "__main__":
     data_aug_suffix = "" if args.execute_data_aug else "_noaug"
     data_path = data_path.replace("../data/", f"../data/{split_prefix}")
 
-    train_ds, val_ds, test_ds = create_regression_img_data(
+    train_ds, val_ds, _ = create_regression_img_data(
         data_path,
         task_name,
         0.2,
@@ -269,14 +269,11 @@ if __name__ == "__main__":
             best_hp = tuner.get_best_hyperparameters(1)[0]
             best_model = build_model_for_kerastuner(best_hp, args.execute_data_aug)
     
-    train_ds, val_ds, test_ds = (
+    train_ds, val_ds = (
         train_ds.batch(batch_size).prefetch(
             buffer_size=tf.data.experimental.AUTOTUNE
         ),
         val_ds.batch(batch_size).prefetch(
-            buffer_size=tf.data.experimental.AUTOTUNE
-        ),
-        test_ds.batch(batch_size).prefetch(
             buffer_size=tf.data.experimental.AUTOTUNE
         ),
     )
@@ -290,33 +287,37 @@ if __name__ == "__main__":
     )
     time_training_end = time.perf_counter()
     time_pred_start = time.perf_counter()
-    y_pred = best_model.predict(test_ds)
+    y_pred = best_model.predict(val_ds)
     time_pred_end = time.perf_counter()
 
-    y_test = np.concatenate([y for _, y in test_ds], axis=0)
+    y_val = np.concatenate([y for _, y in val_ds], axis=0)
     training_time = time_training_end - time_training_start
-    pred_time = time_pred_end - time_pred_start
+    val_inference_time_sec = time_pred_end - time_pred_start
 
-    result_csv_path = (
+    validation_result_csv_path = (
         f"../results/{task_name}_regression_{args.model_name}_{split_run_name}"
-        f"{data_aug_suffix}_{timestamp}.csv"
+        f"{data_aug_suffix}_{timestamp}_validation.csv"
     )
-    create_result_csv(result_csv_path, y_pred.flatten(), y_test)
-
+    create_result_csv(
+        validation_result_csv_path,
+        y_pred.flatten(),
+        y_val,
+        true_column_name="y_val",
+    )
     save_model(best_model, save_model_path)
 
-    mse = mean_squared_error(y_test, y_pred)
+    mse = mean_squared_error(y_val, y_pred)
 
     record_exp_result(
         EXP_ID,
         # metrics
         {
-            "rmse": np.sqrt(mse),
-            "mse": mse,
-            "mae": mean_absolute_error(y_test, y_pred),
-            "r2": r2_score(y_test, y_pred),
+            "val_rmse": np.sqrt(mse),
+            "val_mse": mse,
+            "val_mae": mean_absolute_error(y_val, y_pred),
+            "val_r2": r2_score(y_val, y_pred),
             "training_time": training_time,
-            "pred_time": pred_time,
+            "val_inference_time_sec": val_inference_time_sec,
         },
         # params
         {
@@ -360,7 +361,7 @@ if __name__ == "__main__":
             else None,
             "model_path": save_model_path,
             "explanatory_val": "img",
-            "result_csv_path": result_csv_path,
+            "validation_result_csv_path": validation_result_csv_path,
             "img_size": str(IMG_SIZE),
             "execute_data_aug": args.execute_data_aug,
             "hp_tuning": args.hp_tuning,

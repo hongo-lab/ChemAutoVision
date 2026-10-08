@@ -111,7 +111,8 @@ if __name__ == "__main__":
         )
     except ValueError as exc:
         parser.error(str(exc))
-    for subset, csv_path in split_csv_paths.items():
+    for subset in ("train", "val"):
+        csv_path = split_csv_paths[subset]
         if not csv_path.is_file():
             parser.error(f"{subset} split CSV not found: {csv_path}")
     split_method = split_method_name(args.split_type)
@@ -122,7 +123,6 @@ if __name__ == "__main__":
     )
     train_data_path = str(split_csv_paths["train"])
     val_data_path = str(split_csv_paths["val"])
-    test_data_path = str(split_csv_paths["test"])
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
@@ -135,11 +135,10 @@ if __name__ == "__main__":
     hp_save_dir = f"./graph_hyperopt/hp/dmpnn_{task_name}_{split_run_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     config_save_path = f"./{hp_save_dir}/{task_name}_b{args.batch_size}_dmpnn_best_hp_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
 
-    # atom_descriptors_path が指定された場合、_train/_val/_test のパスを導出する
-    # 命名規則: {base}_atom_desc_train.pkl → {base}_atom_desc_val.pkl / _test.pkl
+    # atom_descriptors_path が指定された場合、_train/_val のパスを導出する
+    # 命名規則: {base}_atom_desc_train.pkl → {base}_atom_desc_val.pkl
     atom_desc_train_path = args.atom_descriptors_path
     atom_desc_val_path = None
-    atom_desc_test_path = None
     atom_desc_metadata = {}
     if atom_desc_train_path is not None:
         if args.radius is not None:
@@ -150,11 +149,9 @@ if __name__ == "__main__":
             parser.error("--atom_descriptors_path must end with _train.pkl")
         _base = atom_desc_train_path.removesuffix("_train.pkl")
         atom_desc_val_path = f"{_base}_val.pkl"
-        atom_desc_test_path = f"{_base}_test.pkl"
         for subset, descriptor_path in {
             "train": atom_desc_train_path,
             "val": atom_desc_val_path,
-            "test": atom_desc_test_path,
         }.items():
             try:
                 atom_desc_metadata[subset] = validate_atom_descriptor_metadata(
@@ -168,7 +165,7 @@ if __name__ == "__main__":
                 parser.error(str(exc))
         print(
             "Atom descriptor provenance verified for "
-            f"{split_run_name}: train/val/test"
+            f"{split_run_name}: train/val"
         )
 
     validation_metric = 'auc' if args.dataset_type == 'classification' else 'mse'
@@ -232,7 +229,6 @@ if __name__ == "__main__":
     tr_args = [
         '--data_path', train_data_path,
         '--separate_val_path', val_data_path,
-        '--separate_test_path', test_data_path,
         '--dataset_type', args.dataset_type,
         '--config_path', config_save_path,
         '--metric', validation_metric,
@@ -251,8 +247,7 @@ if __name__ == "__main__":
     if atom_desc_train_path is not None:
         tr_args += ['--atom_descriptors_path', atom_desc_train_path,
                     '--atom_descriptors', args.atom_descriptors,
-                    '--separate_val_atom_descriptors_path', atom_desc_val_path,
-                    '--separate_test_atom_descriptors_path', atom_desc_test_path]
+                    '--separate_val_atom_descriptors_path', atom_desc_val_path]
     train_args = TrainArgs().parse_args(tr_args)
     data = get_data(
         path=train_args.data_path,
@@ -322,6 +317,7 @@ if __name__ == "__main__":
             data,
             patience=args.patience,
             min_delta=early_stopping_min_delta,
+            evaluate_test=False,
         )
     # except Exception as e:
     #     print(f"Training error: {e}")
@@ -330,45 +326,47 @@ if __name__ == "__main__":
     #     traceback.print_exc()
     # train_model(train_args)
 
-    # predict
-    predict_output_path = f"{model_save_dir}/prediction_{task_name}_{split_run_name}.csv"
+    # Chemprop names this argument --test_path, but the input here is validation data.
+    validation_prediction_path = (
+        f"{model_save_dir}/validation_prediction_{task_name}_{split_run_name}.csv"
+    )
     predict_args_list = [
-        '--test_path', test_data_path,
+        '--test_path', val_data_path,
         '--checkpoint_dir', model_save_dir,
-        '--preds_path', predict_output_path,
+        '--preds_path', validation_prediction_path,
         # '--features_generator', args.features_generator,
         '--smiles_column', 'smiles',
         # '--target_columns', task_name,
         '--gpu', args.gpu
     ]
-    if atom_desc_test_path is not None:
-        predict_args_list += ['--atom_descriptors_path', atom_desc_test_path,
+    if atom_desc_val_path is not None:
+        predict_args_list += ['--atom_descriptors_path', atom_desc_val_path,
                             '--atom_descriptors', args.atom_descriptors]
     predict_args = PredictArgs().parse_args(predict_args_list)
 
     with trusted_chemprop_checkpoint_loading():
         make_predictions(predict_args)
 
-    y_score = pd.read_csv(predict_output_path)[base_task_name]
+    y_score = pd.read_csv(validation_prediction_path)[base_task_name]
     y_preds = np.where(y_score > 0.5, 1, 0)
-    y_test = pd.read_csv(test_data_path)[base_task_name]
+    y_val = pd.read_csv(val_data_path)[base_task_name]
 
     record_exp_result(
         '576013465360263177' if args.dataset_type == "regression" else '570837897253197098',
         # '0',
         # metrics
         {
-            "rmse": np.sqrt(mean_squared_error(y_test, y_score)),
-            "mse": mean_squared_error(y_test, y_score),
-            "mae": mean_absolute_error(y_test, y_score),
-            "r2": r2_score(y_test, y_score),
+            "val_rmse": np.sqrt(mean_squared_error(y_val, y_score)),
+            "val_mse": mean_squared_error(y_val, y_score),
+            "val_mae": mean_absolute_error(y_val, y_score),
+            "val_r2": r2_score(y_val, y_score),
         } if args.dataset_type == "regression" else {
-            "acc": accuracy_score(y_test, y_preds),
-            "recall": recall_score(y_test, y_preds),
-            "precision": precision_score(y_test, y_preds),
-            "roc_auc": roc_auc_score(y_test, y_score),
-            "mcc": matthews_corrcoef(y_test, y_preds),
-            "f1": f1_score(y_test, y_preds),
+            "val_accuracy": accuracy_score(y_val, y_preds),
+            "val_recall": recall_score(y_val, y_preds),
+            "val_precision": precision_score(y_val, y_preds),
+            "val_roc_auc": roc_auc_score(y_val, y_score),
+            "val_mcc": matthews_corrcoef(y_val, y_preds),
+            "val_f1": f1_score(y_val, y_preds),
         },
         # params
         {
@@ -397,7 +395,6 @@ if __name__ == "__main__":
             else None,
             "train_smiles_hash": atom_desc_metadata.get("train", {}).get("ordered_smiles_sha256"),
             "val_smiles_hash": atom_desc_metadata.get("val", {}).get("ordered_smiles_sha256"),
-            "test_smiles_hash": atom_desc_metadata.get("test", {}).get("ordered_smiles_sha256"),
         },
         # tags
         {
@@ -407,6 +404,6 @@ if __name__ == "__main__":
             "model_name": 'chemprops',
             "hp_result_path": hp_save_dir,
             "model_path": get_best_checkpoint_path(train_args.early_stopping_results),
-            "result_csv_path": predict_output_path,
+            "validation_result_csv_path": validation_prediction_path,
         },
     )
