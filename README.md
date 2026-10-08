@@ -187,47 +187,4 @@ docker exec -it [container_id] \
 
 After starting MLflow Tracking UI, open `http://localhost:5000` in your browser.
 
-## Validation-based model selection
 
-`src/evaluate.py` evaluates the saved ChemAutoVision, augmented ResNet18, and
-D-MPNN candidates listed in `model_inventory_report.csv`.  It never copies
-metrics from the training runs.  Instead, it calculates `val_*` metrics for
-all four batch-size candidates in each model/target/split/training-seed group,
-selects by maximum validation ROC-AUC (classification) or minimum validation
-RMSE (regression), and calculates `test_*` metrics only for the selected model.
-
-The classification and regression MLflow experiment IDs are fixed in
-`src/evaluate.py`.  Copy both matching `mlruns/<experiment_id>` directories to
-the server before evaluation so that the same IDs are used there.  The script
-checks that each ID has the expected experiment name before writing anything.
-
-Run a read-only inventory check first:
-
-```
-cd /chemAutoVision/src
-python3 evaluate.py dry-run --gpu 0
-```
-
-Then run the resumable stages separately:
-
-```
-python3 evaluate.py validate --gpu 0
-python3 evaluate.py select
-python3 evaluate.py test --gpu 0
-```
-
-To restrict evaluation to the balanced scaffold split, use
-`--split-type balanced_scaffold`.
-
-Alternatively, run all stages with `python3 evaluate.py all --gpu 0`.  Results,
-selection tables, prediction CSVs, and ROC curves are written under
-`results/evaluation`.  Successful validation and test rows are skipped on a
-later invocation; use `--overwrite` only when an evaluation must be replaced.
-`test_metrics_summary.csv` contains the mean and sample standard deviation of
-each test metric across training seeds for manuscript tables.
-
-Training provenance is read from the source MLflow run when available.  If an
-old run was not copied to the active tracking backend, `evaluate.py` falls back
-to `src/notebooks/automl_cls_results.csv` and `automl_reg_results.csv`, matched
-by source run ID.  Re-run `validate` without `--overwrite` after an interruption:
-finished rows are skipped and only failed or unrecorded candidates are retried.
