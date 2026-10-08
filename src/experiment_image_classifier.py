@@ -181,7 +181,7 @@ if __name__ == "__main__":
     )
     data_path = data_path.replace("../data/", f"../data/{split_prefix}")
 
-    train_ds, val_ds, test_ds = create_cls_image_data(
+    train_ds, val_ds, _ = create_cls_image_data(
         data_path,
         task_name,
         0.2,
@@ -268,14 +268,11 @@ if __name__ == "__main__":
         else:
             raise ValueError("Invalid hp tuning method is input")
 
-    train_ds, val_ds, test_ds = (
+    train_ds, val_ds = (
         train_ds.batch(batch_size).prefetch(
             buffer_size=tf.data.experimental.AUTOTUNE
         ),
         val_ds.batch(batch_size).prefetch(
-            buffer_size=tf.data.experimental.AUTOTUNE
-        ),
-        test_ds.batch(batch_size).prefetch(
             buffer_size=tf.data.experimental.AUTOTUNE
         ),
     )
@@ -290,17 +287,22 @@ if __name__ == "__main__":
     time_training_end = time.perf_counter()
 
     time_pred_start = time.perf_counter()
-    y_score = best_model.predict(test_ds).flatten()
+    y_score = best_model.predict(val_ds).flatten()
     time_pred_end = time.perf_counter()
 
-    pred_time = time_pred_end - time_pred_start
+    val_inference_time_sec = time_pred_end - time_pred_start
     training_time = time_training_end - time_training_start
     y_preds = np.where(y_score > 0.5, 1, 0)
-    y_test = np.concatenate([y for _, y in test_ds], axis=0)
-    roc_file_path = create_roc_curve(y_score, y_test, args.model_name)
+    y_val = np.concatenate([y for _, y in val_ds], axis=0)
+    validation_roc_path = create_roc_curve(y_score, y_val, args.model_name)
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-    result_csv_path = f"../results/{task_name}_classify_{args.model_name}_{split_run_name}_{timestamp}.csv"
-    create_result_csv(result_csv_path, y_score, y_test)
+    validation_result_csv_path = f"../results/{task_name}_classify_{args.model_name}_{split_run_name}_{timestamp}_validation.csv"
+    create_result_csv(
+        validation_result_csv_path,
+        y_score,
+        y_val,
+        true_column_name="y_val",
+    )
 
     save_model_path = f"../models/{task_name}_classify_{args.model_name}_{split_run_name}_{timestamp}.h5"
     save_model(best_model, save_model_path)
@@ -309,14 +311,14 @@ if __name__ == "__main__":
         EXP_ID,
         # metrics
         {
-            "acc": accuracy_score(y_test, y_preds),
-            "recall": recall_score(y_test, y_preds),
-            "precision": precision_score(y_test, y_preds),
-            "roc_auc": roc_auc_score(y_test, y_score),
-            "mcc": matthews_corrcoef(y_test, y_preds),
-            "f1": f1_score(y_test, y_preds),
+            "val_accuracy": accuracy_score(y_val, y_preds),
+            "val_recall": recall_score(y_val, y_preds),
+            "val_precision": precision_score(y_val, y_preds),
+            "val_roc_auc": roc_auc_score(y_val, y_score),
+            "val_mcc": matthews_corrcoef(y_val, y_preds),
+            "val_f1": f1_score(y_val, y_preds),
             "training_time": training_time,
-            "pred_time": pred_time,
+            "val_inference_time_sec": val_inference_time_sec,
         },
         # params
         {
@@ -363,8 +365,8 @@ if __name__ == "__main__":
             else None,
             "model_path": save_model_path,
             "explanatory_val": "img",
-            "result_csv_path": result_csv_path,
-            "roc_img_path": roc_file_path,
+            "validation_result_csv_path": validation_result_csv_path,
+            "validation_roc_img_path": validation_roc_path,
             "execute_data_aug": args.execute_data_aug,
             "img_size": str(IMG_SIZE),
             "hp_tuning": args.hp_tuning,

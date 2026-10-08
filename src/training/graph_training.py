@@ -59,8 +59,16 @@ def run_training_with_early_stopping(
     *,
     patience: int,
     min_delta: float,
+    evaluate_test: bool = True,
 ) -> Dict[str, List[float]]:
-    """Train Chemprop models and stop on a validation-score plateau."""
+    """Train Chemprop models and stop on a validation-score plateau.
+
+    ``evaluate_test=False`` is used by the experiment entry point when test
+    data must remain untouched until model selection.  It requires an explicit
+    validation set and preserves the supplied training set without re-splitting
+    it.  The default keeps the historical Chemprop-compatible behavior used by
+    hyperparameter optimization.
+    """
     if logger is not None:
         debug, info = logger.debug, logger.info
     else:
@@ -69,7 +77,8 @@ def run_training_with_early_stopping(
     torch.manual_seed(args.pytorch_seed)
 
     debug(f"Splitting data with seed {args.seed}")
-    if args.separate_test_path:
+    test_data = None
+    if evaluate_test and args.separate_test_path:
         test_data = get_data(
             path=args.separate_test_path,
             args=args,
@@ -96,7 +105,13 @@ def run_training_with_early_stopping(
             logger=logger,
         )
 
-    if args.separate_val_path and args.separate_test_path:
+    if not evaluate_test:
+        if not args.separate_val_path:
+            raise ValueError(
+                "evaluate_test=False requires an explicit separate validation path"
+            )
+        train_data = data
+    elif args.separate_val_path and args.separate_test_path:
         train_data = data
     elif args.separate_val_path:
         train_data, _, test_data = split_data(
@@ -142,7 +157,7 @@ def run_training_with_early_stopping(
             )
         args.train_class_sizes = get_class_sizes(train_data, proportion=False)
 
-    if args.save_smiles_splits:
+    if args.save_smiles_splits and evaluate_test:
         save_smiles_splits(
             data_path=args.data_path,
             save_dir=args.save_dir,
@@ -159,7 +174,8 @@ def run_training_with_early_stopping(
     if args.features_scaling:
         features_scaler = train_data.normalize_features(replace_nan_token=0)
         val_data.normalize_features(features_scaler)
-        test_data.normalize_features(features_scaler)
+        if test_data is not None:
+            test_data.normalize_features(features_scaler)
     else:
         features_scaler = None
 
@@ -170,9 +186,10 @@ def run_training_with_early_stopping(
         val_data.normalize_features(
             atom_descriptor_scaler, scale_atom_descriptors=True
         )
-        test_data.normalize_features(
-            atom_descriptor_scaler, scale_atom_descriptors=True
-        )
+        if test_data is not None:
+            test_data.normalize_features(
+                atom_descriptor_scaler, scale_atom_descriptors=True
+            )
     else:
         atom_descriptor_scaler = None
 
@@ -183,21 +200,25 @@ def run_training_with_early_stopping(
         val_data.normalize_features(
             bond_descriptor_scaler, scale_bond_descriptors=True
         )
-        test_data.normalize_features(
-            bond_descriptor_scaler, scale_bond_descriptors=True
-        )
+        if test_data is not None:
+            test_data.normalize_features(
+                bond_descriptor_scaler, scale_bond_descriptors=True
+            )
     else:
         bond_descriptor_scaler = None
 
     args.train_data_size = len(train_data)
-    debug(
+    size_message = (
         f"Total size = {len(data):,} | train size = {len(train_data):,} | "
-        f"val size = {len(val_data):,} | test size = {len(test_data):,}"
+        f"val size = {len(val_data):,}"
     )
+    if test_data is not None:
+        size_message += f" | test size = {len(test_data):,}"
+    debug(size_message)
     if len(val_data) == 0:
         raise ValueError("The validation data split is empty; early stopping requires validation data.")
-    empty_test_set = len(test_data) == 0
-    if empty_test_set:
+    empty_test_set = test_data is None or len(test_data) == 0
+    if evaluate_test and empty_test_set:
         debug("The test data split is empty. Test metrics will be NaN.")
 
     if args.dataset_type == "regression":
@@ -211,7 +232,10 @@ def run_training_with_early_stopping(
         args.spectra_phase_mask = None
     elif args.dataset_type == "spectra":
         args.spectra_phase_mask = load_phase_mask(args.spectra_phase_mask_path)
-        for dataset in [train_data, test_data, val_data]:
+        datasets = [train_data, val_data]
+        if test_data is not None:
+            datasets.append(test_data)
+        for dataset in datasets:
             data_targets = normalize_spectra(
                 spectra=dataset.targets(),
                 phase_features=dataset.phase_features(),
@@ -228,19 +252,20 @@ def run_training_with_early_stopping(
         atom_bond_scaler = None
 
     loss_func = get_loss_func(args)
-    test_smiles, test_targets = test_data.smiles(), test_data.targets()
-    if args.dataset_type == "multiclass":
-        sum_test_preds = np.zeros(
-            (len(test_smiles), args.num_tasks, args.multiclass_num_classes)
-        )
-    elif args.is_atom_bond_targets:
-        sum_test_preds = []
-        for targets_by_task in zip(*test_data.targets()):
-            targets_by_task = np.concatenate(targets_by_task)
-            sum_test_preds.append(np.zeros((targets_by_task.shape[0], 1)))
-        sum_test_preds = np.array(sum_test_preds, dtype=object)
-    else:
-        sum_test_preds = np.zeros((len(test_smiles), args.num_tasks))
+    if evaluate_test:
+        test_smiles, test_targets = test_data.smiles(), test_data.targets()
+        if args.dataset_type == "multiclass":
+            sum_test_preds = np.zeros(
+                (len(test_smiles), args.num_tasks, args.multiclass_num_classes)
+            )
+        elif args.is_atom_bond_targets:
+            sum_test_preds = []
+            for targets_by_task in zip(*test_data.targets()):
+                targets_by_task = np.concatenate(targets_by_task)
+                sum_test_preds.append(np.zeros((targets_by_task.shape[0], 1)))
+            sum_test_preds = np.array(sum_test_preds, dtype=object)
+        else:
+            sum_test_preds = np.zeros((len(test_smiles), args.num_tasks))
 
     if len(data) <= args.cache_cutoff:
         set_cache_graph(True)
@@ -260,9 +285,11 @@ def run_training_with_early_stopping(
     val_data_loader = MoleculeDataLoader(
         dataset=val_data, batch_size=args.batch_size, num_workers=num_workers
     )
-    test_data_loader = MoleculeDataLoader(
-        dataset=test_data, batch_size=args.batch_size, num_workers=num_workers
-    )
+    test_data_loader = None
+    if evaluate_test:
+        test_data_loader = MoleculeDataLoader(
+            dataset=test_data, batch_size=args.batch_size, num_workers=num_workers
+        )
     if args.class_balance:
         debug(f"With class_balance, effective train size = {train_data_loader.iter_size:,}")
 
@@ -413,13 +440,11 @@ def run_training_with_early_stopping(
                 f"{best_score:.6f} on epoch {best_epoch}"
             )
 
-        model = restore_best_checkpoint(
-            checkpoint_path,
-            lambda path: load_checkpoint(path, device=args.device, logger=logger),
-        )
-        if empty_test_set:
-            info(f"Model {model_idx} provided with no test set; skipping test evaluation.")
-        else:
+        if evaluate_test and not empty_test_set:
+            model = restore_best_checkpoint(
+                checkpoint_path,
+                lambda path: load_checkpoint(path, device=args.device, logger=logger),
+            )
             test_preds = predict(
                 model=model,
                 data_loader=test_data_loader,
@@ -452,42 +477,46 @@ def run_training_with_early_stopping(
                         writer.add_scalar(
                             f"test_{task_name}_{metric}", test_score, n_iter
                         )
+        elif evaluate_test:
+            info(f"Model {model_idx} provided with no test set; skipping test evaluation.")
         writer.close()
 
     args.early_stopping_results = early_stopping_results
 
-    if empty_test_set:
-        ensemble_scores = {
-            metric: [np.nan for _ in args.task_names] for metric in args.metrics
-        }
-    else:
-        avg_test_preds = (sum_test_preds / args.ensemble_size).tolist()
-        ensemble_scores = evaluate_predictions(
-            preds=avg_test_preds,
-            targets=test_targets,
-            num_tasks=args.num_tasks,
-            metrics=args.metrics,
-            dataset_type=args.dataset_type,
-            is_atom_bond_targets=args.is_atom_bond_targets,
-            gt_targets=test_data.gt_targets(),
-            lt_targets=test_data.lt_targets(),
-            logger=logger,
-        )
+    ensemble_scores: Dict[str, List[float]] = {}
+    if evaluate_test:
+        if empty_test_set:
+            ensemble_scores = {
+                metric: [np.nan for _ in args.task_names] for metric in args.metrics
+            }
+        else:
+            avg_test_preds = (sum_test_preds / args.ensemble_size).tolist()
+            ensemble_scores = evaluate_predictions(
+                preds=avg_test_preds,
+                targets=test_targets,
+                num_tasks=args.num_tasks,
+                metrics=args.metrics,
+                dataset_type=args.dataset_type,
+                is_atom_bond_targets=args.is_atom_bond_targets,
+                gt_targets=test_data.gt_targets(),
+                lt_targets=test_data.lt_targets(),
+                logger=logger,
+            )
 
-    for metric, scores in ensemble_scores.items():
-        mean_ensemble_test_score = multitask_mean(scores, metric=metric)
-        info(f"Ensemble test {metric} = {mean_ensemble_test_score:.6f}")
-        if args.show_individual_scores:
-            for task_name, ensemble_score in zip(args.task_names, scores):
-                info(f"Ensemble test {task_name} {metric} = {ensemble_score:.6f}")
+        for metric, scores in ensemble_scores.items():
+            mean_ensemble_test_score = multitask_mean(scores, metric=metric)
+            info(f"Ensemble test {metric} = {mean_ensemble_test_score:.6f}")
+            if args.show_individual_scores:
+                for task_name, ensemble_score in zip(args.task_names, scores):
+                    info(f"Ensemble test {task_name} {metric} = {ensemble_score:.6f}")
 
-    with open(os.path.join(args.save_dir, "test_scores.json"), "w") as file:
-        json.dump(ensemble_scores, file, indent=4, sort_keys=True)
+        with open(os.path.join(args.save_dir, "test_scores.json"), "w") as file:
+            json.dump(ensemble_scores, file, indent=4, sort_keys=True)
 
     with open(os.path.join(args.save_dir, "early_stopping.json"), "w") as file:
         json.dump(early_stopping_results, file, indent=4)
 
-    if args.save_preds and not empty_test_set:
+    if evaluate_test and args.save_preds and not empty_test_set:
         test_preds_dataframe = pd.DataFrame(data={"smiles": test_data.smiles()})
         for i, task_name in enumerate(args.task_names):
             test_preds_dataframe[task_name] = [pred[i] for pred in avg_test_preds]
