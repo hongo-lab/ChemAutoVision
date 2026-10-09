@@ -16,4 +16,5 @@ mlruns
 data/images/
 models/
 results/
+model_inventory_report.csv
 docs/

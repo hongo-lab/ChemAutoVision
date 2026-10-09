@@ -39,7 +39,7 @@ from utils.utils import create_result_csv, list_gpu_names
 import json
 import os
 
-EXP_ID = 576013465360263177
+EXP_ID = 346038581243336323
 
 LOSS = "mean_squared_error"
 AK_SERCH_MODEL = None
