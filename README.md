@@ -167,6 +167,28 @@ After training, each candidate model is evaluated on the validation data. The re
 
 The training scripts do not evaluate candidate models on the test data.
 
+# Model selection and test evaluation
+
+MLflow training runs are the source of truth for model discovery and metrics.
+The evaluation workflow does not create evaluation-only MLflow runs.
+
+Run the following commands from `/chemAutoVision/src`:
+
+```
+python3 evaluate.py dry-run
+python3 evaluate.py validate --gpu 0
+python3 evaluate.py select
+python3 evaluate.py test --gpu 0
+```
+
+`dry-run` checks that every expected training condition and saved model exists
+in MLflow. `validate` preserves validation metrics already recorded during
+training and calculates only missing `val_*` metrics, adding them to the same
+training run. `select` chooses the best batch size using `val_roc_auc` for
+classification or `val_rmse` for regression. Finally, `test` evaluates only
+the selected models and adds `test_*` metrics to those same training runs.
+Missing MLflow runs stop selection and test evaluation with an error.
+
 # Confirm metrics of trained model
 ## MLflow Tracking
 Model training settings and evaluation metrics are recorded using MLflow. 

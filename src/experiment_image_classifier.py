@@ -47,7 +47,7 @@ from utils.split import (
 from utils.utils import create_result_csv, list_gpu_names
 import os
 
-EXP_ID = 570837897253197098
+EXP_ID = 645489900222138469
 
 DATA_PATHS = {
     "hERG": "../data/hERG_img.pkl",
