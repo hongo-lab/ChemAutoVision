@@ -1,9 +1,0 @@
-artifact_location: mlflow-artifacts:/570837897253197098
-creation_time: 1747551887798
-experiment_id: '570837897253197098'
-last_update_time: 1782744808619
-lifecycle_stage: active
-name: chemAutoVision_cls
-tags:
-  mlflow.experimentKind: custom_model_development
-  mlflow.note.content: ''

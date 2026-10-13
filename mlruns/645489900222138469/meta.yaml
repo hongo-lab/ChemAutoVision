@@ -1,0 +1,6 @@
+artifact_location: mlflow-artifacts:/645489900222138469
+creation_time: 1790746201580
+experiment_id: '645489900222138469'
+last_update_time: 1790746201580
+lifecycle_stage: active
+name: val_automl_cls
