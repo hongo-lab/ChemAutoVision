@@ -18,3 +18,11 @@ models/
 results/
 model_inventory_report.csv
 docs/
+
+# Local model inventory and evaluation maintenance tools
+/src/check_model_inventory.py
+/src/copy_missing_models.py
+/src/reset_evaluation_records.py
+/src/tests/test_check_model_inventory.py
+/src/tests/test_copy_missing_models.py
+/src/tests/test_reset_evaluation_records.py
