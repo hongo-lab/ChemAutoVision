@@ -62,11 +62,14 @@ def create_regression_img_data(
     task_name: str,
     test_size: int | None,
     img_size: tuple[int, int],
+    target_column: str | None = None,
 ) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     _df = pd.read_pickle(data_path)
 
     smiles_column = "smiles"
-    ob_column = task_name
+    ob_column = target_column or task_name
+    if ob_column not in _df.columns:
+        raise ValueError(f"Target column {ob_column!r} not found in {data_path}")
 
     _df["image"] = _df["img_path"].apply(preprocess_image)
 

@@ -14,6 +14,12 @@ from tensorflow.keras.models import save_model
 from keras_tuner import Objective
 from keras_tuner.tuners import BayesianOptimization
 
+from data.dataset_registry import (
+    QM9_TASKS,
+    dataset_name_for_task,
+    target_column_for_task,
+    target_unit,
+)
 from data.images import create_regression_img_data
 from modeling.modeling import (
     create_vgg16_model,
@@ -76,6 +82,7 @@ DATA_PATHS = {
     "ESOL": "../data/ESOL_img.pkl",
     "Lipo": "../data/Lipo_img.pkl",
     "FreeSolv": "../data/FreeSolv_img.pkl",
+    **{task_name: "../data/QM9_img.pkl" for task_name in QM9_TASKS},
 }
 
 def build_model_for_kerastuner(hp, is_execute_data_aug):
@@ -157,6 +164,12 @@ if __name__ == "__main__":
     print(gpu_names)
 
     task_name = args.task_name
+    try:
+        target_column = target_column_for_task(task_name)
+    except ValueError as exc:
+        parser.error(str(exc))
+    dataset_name = dataset_name_for_task(task_name)
+    run_target = task_name
     batch_size = int(args.batch_size)
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     
@@ -178,12 +191,13 @@ if __name__ == "__main__":
         data_path,
         task_name,
         0.2,
-        IMG_SIZE
+        IMG_SIZE,
+        target_column=target_column,
     )
 
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     save_model_path = (
-        f"../models/{task_name}_regression_{args.model_name}_{split_run_name}"
+        f"../models/{run_target}_regression_{args.model_name}_{split_run_name}"
         f"{data_aug_suffix}_{timestamp}.h5"
     )
     call_backs = create_callbacks()
@@ -209,7 +223,7 @@ if __name__ == "__main__":
             inputs=input_node,
             outputs=output_node,
             overwrite=True,
-            directory=f"./auto_model/{task_name}_bs{args.batch_size}_seed{args.seed}_{split_run_name}",
+            directory=f"./auto_model/{run_target}_bs{args.batch_size}_seed{args.seed}_{split_run_name}",
             max_trials=args.max_trials,
             seed=args.seed,
         )
@@ -253,7 +267,7 @@ if __name__ == "__main__":
                         max_trials=args.max_trials,
                         executions_per_trial=1,
                         directory=(
-                            f"keras_tuner/{task_name}_seed{args.seed}_"
+                            f"keras_tuner/{run_target}_seed{args.seed}_"
                             f"{split_run_name}{data_aug_suffix}"
                         ),
                         project_name=f"{args.model_name}_bs{batch_size}_bayesian",
@@ -295,7 +309,7 @@ if __name__ == "__main__":
     val_inference_time_sec = time_pred_end - time_pred_start
 
     validation_result_csv_path = (
-        f"../results/{task_name}_regression_{args.model_name}_{split_run_name}"
+        f"../results/{run_target}_regression_{args.model_name}_{split_run_name}"
         f"{data_aug_suffix}_{timestamp}_validation.csv"
     )
     create_result_csv(
@@ -344,7 +358,9 @@ if __name__ == "__main__":
         },
         # tags
         {
-            "target": task_name,
+            "dataset": dataset_name,
+            "target": target_column,
+            "target_unit": target_unit(task_name),
             "gpu_names": gpu_names,
             "csv_path": data_path,
             "data_split": split_method,

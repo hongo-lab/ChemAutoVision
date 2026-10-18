@@ -280,6 +280,35 @@ def test_mlflow_training_run_is_converted_to_candidate(tmp_path: Path):
     assert result.model_path == model.resolve()
 
 
+def test_qm9_mlflow_run_uses_shared_dataset_and_selected_target(tmp_path: Path):
+    model = tmp_path / "model.h5"
+    model.write_bytes(b"model")
+    run = SimpleNamespace(
+        info=SimpleNamespace(run_id="qm9-run", status="FINISHED"),
+        data=SimpleNamespace(
+            params={"seed": "42", "batch_size": "8"},
+            tags={
+                "model_name": "autokeras",
+                "dataset": "QM9",
+                "target": "homo",
+                "data_split": "random",
+                "model_path": str(model),
+                "execute_data_aug": "False",
+            },
+            metrics={},
+        ),
+    )
+
+    result = _candidate_from_mlflow_run(run, repo_root=tmp_path)
+
+    assert result is not None
+    assert result.dataset_name == "QM9"
+    assert result.task_name == "QM9_homo"
+    assert result.target == "homo"
+    assert result.task_type == "regression"
+    assert evaluate._dataset_pickle_path(result).name == "QM9_img.pkl"
+
+
 def test_non_augmented_resnet_run_is_out_of_scope(tmp_path: Path):
     run = SimpleNamespace(
         info=SimpleNamespace(run_id="run", status="FINISHED"),

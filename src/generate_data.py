@@ -1,16 +1,28 @@
 import argparse
+import hashlib
+import importlib.metadata
+import json
 import math
 import os
 import random
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Sequence
 
 import deepchem as dc
+import numpy as np
 import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import MolStandardize
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from sklearn.model_selection import train_test_split
 
-from data.images import padding_image, smi_to_img
+from data.dataset_registry import (
+    QM9_TARGETS,
+    dataset_name_for_task,
+    target_columns_for_generation,
+)
+from data.qm9 import load_qm9_dataframe
 from settings import IMG_SIZE, IS_DOWNSCALE_BEFORE_DAUG
 from utils.split import BALANCED_SCAFFOLD_SPLIT_TYPE, make_split_prefix
 
@@ -21,8 +33,12 @@ CLASSIFICATION_TASKS = {"BBBP", "hERG", "P-gp", "CYP3A4"}
 
 
 def _generate_image(
-    _df_row: pd.Series, task_name: str, split_prefix: str = ""
+    _df_row: pd.Series,
+    task_name: str,
+    split_prefix: str = "",
+    overwrite: bool = False,
 ) -> pd.Series:
+    from data.images import padding_image, smi_to_img
 
     if task_name in ["london", "lz", "dm"]:
         img_dir = "qm"
@@ -39,22 +55,34 @@ def _generate_image(
 
     img_output_dir = f"../data/images/{img_dir}"
     os.makedirs(img_output_dir, exist_ok=True)
-    img_file_path = f"{img_output_dir}/{_df_row.idx}.png"
+    if task_name == "QM9":
+        image_key = hashlib.sha256(_df_row.smiles.encode("utf-8")).hexdigest()
+    else:
+        image_key = str(_df_row.idx)
+    img_file_path = f"{img_output_dir}/{image_key}.png"
 
-    original_img = smi_to_img(
-        _df_row.smiles,
-        original_img_size,
-    )
-    padded_img = padding_image(original_img, (IMG_SIZE[0], IMG_SIZE[1]))
-    padded_img.save(img_file_path)
+    if overwrite or not os.path.isfile(img_file_path):
+        original_img = smi_to_img(
+            _df_row.smiles,
+            original_img_size,
+        )
+        padded_img = padding_image(original_img, (IMG_SIZE[0], IMG_SIZE[1]))
+        temporary_path = f"{img_file_path}.tmp"
+        padded_img.save(temporary_path, format="PNG")
+        os.replace(temporary_path, img_file_path)
 
     _df_row["img_path"] = img_file_path
 
     return _df_row
 
 
-def _exc_dup_mol(df: pd.DataFrame, task_name: str) -> pd.DataFrame:
-    if "smiles" not in df.columns or task_name not in df.columns:
+def _exc_dup_mol(
+    df: pd.DataFrame, target_columns: str | Sequence[str]
+) -> pd.DataFrame:
+    columns = (
+        (target_columns,) if isinstance(target_columns, str) else tuple(target_columns)
+    )
+    if "smiles" not in df.columns or any(column not in df.columns for column in columns):
         raise ValueError("Invalid DataFrame columns")
 
     dup_smiles = set(df[df.duplicated(subset=["smiles"], keep=False)]["smiles"])
@@ -64,8 +92,7 @@ def _exc_dup_mol(df: pd.DataFrame, task_name: str) -> pd.DataFrame:
     smiles_to_remove = set()
     for smiles in dup_smiles:
         subset = df[df["smiles"] == smiles]
-        uni_tasks = subset[task_name].unique()
-        if len(uni_tasks) > 1:
+        if len(subset.loc[:, columns].drop_duplicates()) > 1:
             smiles_to_remove.add(smiles)
 
     if smiles_to_remove:
@@ -92,6 +119,9 @@ def _find_largest_smiles(smiles: str) -> str:
 
 
 def _preprocess_smiles(smiles: str) -> str:
+    smiles = _smi_to_canonical_smi(smiles)
+    if smiles is None:
+        return None
     smiles = _find_largest_smiles(smiles)
     if smiles is None:
         return None
@@ -100,7 +130,9 @@ def _preprocess_smiles(smiles: str) -> str:
 
 
 def _load_data(task_name: str) -> pd.DataFrame:
-    if task_name == "FreeSolv":
+    if task_name == "QM9":
+        datasets = load_qm9_dataframe()
+    elif task_name == "FreeSolv":
         _, datasets, _ = dc.molnet.load_freesolv(
             featurizer=dc.feat.RawFeaturizer(), split=None
         )
@@ -130,7 +162,8 @@ def _load_data(task_name: str) -> pd.DataFrame:
             {"smiles": datasets[0].ids, task_name: datasets[0].y.flatten()}
         )
 
-    datasets["index"] = datasets.index
+    if "source_index" not in datasets.columns:
+        datasets["index"] = datasets.index
     return datasets
 
 
@@ -248,9 +281,16 @@ def _smi_to_canonical_smi(smiles: str) -> str:
     return Chem.MolToSmiles(mol, canonical=True)
 
 def _save_split_csvs(
-    df: pd.DataFrame, task_name: str, prefix: str, split_prefix: str = ""
+    df: pd.DataFrame,
+    task_name: str,
+    target_columns: Sequence[str],
+    prefix: str,
+    split_prefix: str = "",
 ) -> None:
-    cols = ["idx", "smiles", task_name, "group", "img_path"]
+    identifier_columns = ["idx"]
+    if "source_index" in df.columns:
+        identifier_columns.append("source_index")
+    cols = [*identifier_columns, "smiles", *target_columns, "group", "img_path"]
     for split in ("train", "val", "test"):
         name = (
             f"{split}_{split_prefix}{prefix}_{task_name}_img.csv"
@@ -262,9 +302,56 @@ def _save_split_csvs(
         print(f"Saved: {out}")
 
 
-if __name__ == "__main__":
+def _ordered_data_sha256(df: pd.DataFrame, target_columns: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for row in df.loc[:, ["smiles", *target_columns]].itertuples(
+        index=False, name=None
+    ):
+        digest.update(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _write_qm9_metadata(
+    df: pd.DataFrame,
+    output_path: str,
+    split_type: str,
+    split_seed: int | None,
+    loader_count: int,
+) -> None:
+    metadata = {
+        "schema_version": 1,
+        "dataset": "QM9",
+        "loader": "deepchem.molnet.load_qm9",
+        "deepchem_version": importlib.metadata.version("deepchem"),
+        "rdkit_version": importlib.metadata.version("rdkit"),
+        "pandas_version": pd.__version__,
+        "target_units": {"homo": "Hartree", "lumo": "Hartree", "mu": "Debye"},
+        "loader_row_count": loader_count,
+        "processed_row_count": len(df),
+        "fold_counts": {
+            str(key): int(value) for key, value in df["group"].value_counts().items()
+        },
+        "split_type": split_type,
+        "split_seed": split_seed if split_type == BALANCED_SCAFFOLD_SPLIT_TYPE else None,
+        "image_size": list(IMG_SIZE),
+        "ordered_data_sha256": _ordered_data_sha256(df, QM9_TARGETS),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata_path = Path(output_path).with_suffix(".metadata.json")
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"Saved: {metadata_path}")
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="generate data")
-    parser.add_argument("--task_name", type=str, help="the task name")
+    parser.add_argument("--task_name", type=str, required=True, help="the task name")
     parser.add_argument(
         "--split_type",
         type=str,
@@ -278,37 +365,67 @@ if __name__ == "__main__":
         default=None,
         help="seed for balanced scaffold assignment (required for balanced_scaffold)",
     )
+    parser.add_argument(
+        "--overwrite_images",
+        action="store_true",
+        help="regenerate molecular images that already exist",
+    )
     args = parser.parse_args()
     task_name = args.task_name
+    dataset_name = dataset_name_for_task(task_name)
     split_type = args.split_type
     split_seed = args.split_seed
     # balanced scaffold splitの生成物は方式とseedをファイル名に含める。
     # random（デフォルト）では空文字なので従来の挙動を完全維持する。
     split_prefix = make_split_prefix(split_type, split_seed)
 
-    output_path = f"../data/{split_prefix}{task_name}_img.pkl"
+    output_path = f"../data/{split_prefix}{dataset_name}_img.pkl"
 
-    _df = _load_data(task_name)
+    _df = _load_data(dataset_name)
+    loader_count = len(_df)
+    target_columns = target_columns_for_generation(task_name)
 
     # desalts
     _df["smiles"] = _df["smiles"].apply(_preprocess_smiles)
     _df = _df[_df["smiles"].notna()]
+    if dataset_name == "QM9":
+        _df = _df[np.isfinite(_df[list(target_columns)]).all(axis=1)]
     # remove duplicated mol
-    _df = _exc_dup_mol(_df, task_name)
+    _df = _exc_dup_mol(_df, target_columns)
     # data split
     _df = _dispatch_split(_df, split_type, split_seed)
-    _validate_split(_df, task_name)
+    _validate_split(_df, dataset_name)
     _df.index.name = 'idx'
     _df = _df.reset_index()
 
-    df = pd.DataFrame(
-        {"idx": [], "smiles": [], task_name: [], "group": [], "img_path": []}
-    )
-    for _, _df_row in _df.iterrows():
-        _df_row_tmp = _generate_image(_df_row, task_name, split_prefix)
-        df = pd.concat([df, pd.DataFrame([_df_row_tmp])], axis=0)
+    image_paths = []
+    total_images = len(_df)
+    for image_number, (_, row) in enumerate(_df.iterrows(), start=1):
+        generated = _generate_image(
+            row,
+            dataset_name,
+            split_prefix,
+            overwrite=args.overwrite_images,
+        )
+        image_paths.append(generated["img_path"])
+        if image_number % 1000 == 0 or image_number == total_images:
+            print(f"Images: {image_number}/{total_images}")
+    df = _df.copy()
+    df["img_path"] = image_paths
 
     df.to_pickle(output_path)
-    _save_split_csvs(df, task_name, "", split_prefix)
+    _save_split_csvs(df, dataset_name, target_columns, "", split_prefix)
+    if dataset_name == "QM9":
+        _write_qm9_metadata(
+            df,
+            output_path,
+            split_type,
+            split_seed,
+            loader_count,
+        )
 
     print("End Creating Data")
+
+
+if __name__ == "__main__":
+    main()

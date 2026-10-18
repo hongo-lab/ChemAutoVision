@@ -1030,19 +1030,19 @@ files = [
 
 [[package]]
 name = "deepchem"
-version = "2.8.0"
+version = "2.8.1.dev20260821122258"
 description = "Deep learning models for drug discovery,         quantum chemistry, and the life sciences."
 optional = false
-python-versions = "<3.12,>=3.7"
+python-versions = "<3.13,>=3.7"
 groups = ["main"]
 files = [
-    {file = "deepchem-2.8.0-py3-none-any.whl", hash = "sha256:042c7639770e69b127f3df5e5bdf139893caa1706d512893d78728fd0a2de8b0"},
-    {file = "deepchem-2.8.0.tar.gz", hash = "sha256:ba3f0cf3b589a33dd70757b1045600f52bb539bcd2b6fed9058cb76c7e9d4538"},
+    {file = "deepchem-2.8.1.dev20260821122258-py3-none-any.whl", hash = "sha256:c8f3acd548acc2806bdb5fad514b26fe7ad6f6c2891f9c196c01d26bd64d4809"},
+    {file = "deepchem-2.8.1.dev20260821122258.tar.gz", hash = "sha256:abe7244aa11727861f93c91a17ce2d98476be932b82673415ed4ca96485ff9fc"},
 ]
 
 [package.dependencies]
 joblib = "*"
-numpy = ">=1.21"
+numpy = "<2"
 pandas = "*"
 rdkit = "*"
 scikit-learn = "*"
@@ -1050,10 +1050,10 @@ scipy = ">=1.10.1"
 sympy = "*"
 
 [package.extras]
-dqc = ["dqc", "pylibxc2", "torch", "xitorch"]
-jax = ["dm-haiku", "jax", "jaxlib", "optax"]
-tensorflow = ["tensorflow", "tensorflow-addons", "tensorflow-probability"]
-torch = ["dgl", "dgllife", "pytorch-lightning", "torch", "torchvision"]
+dqc = ["dqc", "pylibxc2", "torch (==2.2.1)", "xitorch"]
+jax = ["dm-haiku (==0.0.13)", "jax (==0.4.30)", "jaxlib (==0.4.30)", "optax"]
+tensorflow = ["tensorflow", "tensorflow_addons ; python_version < \"3.12\"", "tensorflow_probability"]
+torch = ["dgl (<2.2.1)", "dgllife", "pytorch-lightning", "torch (==2.2.1)", "torchvision"]
 
 [[package]]
 name = "defusedxml"
@@ -4583,15 +4583,15 @@ pytz = ">=2020.1"
 tzdata = ">=2022.1"
 
 [package.extras]
-all = ["PyQt5 (>=5.15.1)", "SQLAlchemy (>=1.4.16)", "beautifulsoup4 (>=4.9.3)", "bottleneck (>=1.3.2)", "brotlipy (>=0.7.0)", "fastparquet (>=0.6.3)", "fsspec (>=2021.7.0)", "gcsfs (>=2021.7.0)", "html5lib (>=1.1)", "hypothesis (>=6.34.2)", "jinja2 (>=3.0.0)", "lxml (>=4.6.3)", "matplotlib (>=3.6.1)", "numba (>=0.53.1)", "numexpr (>=2.7.3)", "odfpy (>=1.4.1)", "openpyxl (>=3.0.7)", "pandas-gbq (>=0.15.0)", "psycopg2 (>=2.8.6)", "pyarrow (>=7.0.0)", "pymysql (>=1.0.2)", "pyreadstat (>=1.1.2)", "pytest (>=7.3.2)", "pytest-asyncio (>=0.17.0)", "pytest-xdist (>=2.2.0)", "python-snappy (>=0.6.0)", "pyxlsb (>=1.0.8)", "qtpy (>=2.2.0)", "s3fs (>=2021.8.0)", "scipy (>=1.7.1)", "tables (>=3.6.1)", "tabulate (>=0.8.9)", "xarray (>=0.21.0)", "xlrd (>=2.0.1)", "xlsxwriter (>=1.4.3)", "zstandard (>=0.15.2)"]
-aws = ["s3fs (>=2021.8.0)"]
+all = ["PyQt5 (>=5.15.1)", "SQLAlchemy (>=1.4.16)", "beautifulsoup4 (>=4.9.3)", "bottleneck (>=1.3.2)", "brotlipy (>=0.7.0)", "fastparquet (>=0.6.3)", "fsspec (>=2021.07.0)", "gcsfs (>=2021.07.0)", "html5lib (>=1.1)", "hypothesis (>=6.34.2)", "jinja2 (>=3.0.0)", "lxml (>=4.6.3)", "matplotlib (>=3.6.1)", "numba (>=0.53.1)", "numexpr (>=2.7.3)", "odfpy (>=1.4.1)", "openpyxl (>=3.0.7)", "pandas-gbq (>=0.15.0)", "psycopg2 (>=2.8.6)", "pyarrow (>=7.0.0)", "pymysql (>=1.0.2)", "pyreadstat (>=1.1.2)", "pytest (>=7.3.2)", "pytest-asyncio (>=0.17.0)", "pytest-xdist (>=2.2.0)", "python-snappy (>=0.6.0)", "pyxlsb (>=1.0.8)", "qtpy (>=2.2.0)", "s3fs (>=2021.08.0)", "scipy (>=1.7.1)", "tables (>=3.6.1)", "tabulate (>=0.8.9)", "xarray (>=0.21.0)", "xlrd (>=2.0.1)", "xlsxwriter (>=1.4.3)", "zstandard (>=0.15.2)"]
+aws = ["s3fs (>=2021.08.0)"]
 clipboard = ["PyQt5 (>=5.15.1)", "qtpy (>=2.2.0)"]
 compression = ["brotlipy (>=0.7.0)", "python-snappy (>=0.6.0)", "zstandard (>=0.15.2)"]
 computation = ["scipy (>=1.7.1)", "xarray (>=0.21.0)"]
 excel = ["odfpy (>=1.4.1)", "openpyxl (>=3.0.7)", "pyxlsb (>=1.0.8)", "xlrd (>=2.0.1)", "xlsxwriter (>=1.4.3)"]
 feather = ["pyarrow (>=7.0.0)"]
-fss = ["fsspec (>=2021.7.0)"]
-gcp = ["gcsfs (>=2021.7.0)", "pandas-gbq (>=0.15.0)"]
+fss = ["fsspec (>=2021.07.0)"]
+gcp = ["gcsfs (>=2021.07.0)", "pandas-gbq (>=0.15.0)"]
 hdf5 = ["tables (>=3.6.1)"]
 html = ["beautifulsoup4 (>=4.9.3)", "html5lib (>=1.1)", "lxml (>=4.6.3)"]
 mysql = ["SQLAlchemy (>=1.4.16)", "pymysql (>=1.0.2)"]
@@ -8109,4 +8109,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10, <3.12"
-content-hash = "fbf31701459b1853029e46d3d78b1c0e2e4c4abb98c57e4a7671e77ce87e64c2"
+content-hash = "605ca9cf5beafec359e9c9e27c2aed8429040002257d24eec05e4e998a6ed1e4"
