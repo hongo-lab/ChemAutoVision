@@ -355,7 +355,6 @@ if __name__ == "__main__":
         '--preds_path', validation_prediction_path,
         # '--features_generator', args.features_generator,
         '--smiles_column', 'smiles',
-        # '--target_columns', task_name,
         '--gpu', args.gpu
     ]
     if atom_desc_val_path is not None:

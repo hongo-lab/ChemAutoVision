@@ -10,6 +10,7 @@ from rdkit import Chem
 from rdkit.Chem import Draw
 from tensorflow.keras.utils import img_to_array
 
+from data.dataset_registry import target_column_for_task
 from settings import IMG_SIZE, IS_DOWNSCALE_BEFORE_DAUG
 
 
@@ -62,12 +63,11 @@ def create_regression_img_data(
     task_name: str,
     test_size: int | None,
     img_size: tuple[int, int],
-    target_column: str | None = None,
 ) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     _df = pd.read_pickle(data_path)
 
     smiles_column = "smiles"
-    ob_column = target_column or task_name
+    ob_column = target_column_for_task(task_name)
     if ob_column not in _df.columns:
         raise ValueError(f"Target column {ob_column!r} not found in {data_path}")
 

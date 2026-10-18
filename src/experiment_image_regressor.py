@@ -192,7 +192,6 @@ if __name__ == "__main__":
         task_name,
         0.2,
         IMG_SIZE,
-        target_column=target_column,
     )
 
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
