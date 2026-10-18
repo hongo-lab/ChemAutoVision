@@ -29,6 +29,11 @@ import torch
 from utils.utils import list_gpu_names
 import os
 from data.objectives import calc_weights_for_binary
+from data.dataset_registry import (
+    dataset_name_for_task,
+    target_column_for_task,
+    target_unit,
+)
 from recording.record_mlflow import record_exp_result
 from training.graph_training import run_training_with_early_stopping
 from training.early_stopping import get_best_checkpoint_path
@@ -104,10 +109,24 @@ if __name__ == "__main__":
     )
 
     task_name = args.task_name
-    base_task_name = task_name[2:] if task_name[:2] in ("t_", "q_") else task_name
+    legacy_target_name = (
+        task_name[2:] if task_name[:2] in ("t_", "q_") else task_name
+    )
+    if legacy_target_name != task_name:
+        # Preserve legacy t_/q_ aliases used by existing graph experiments.
+        target_column = legacy_target_name
+        dataset_name = task_name
+        run_target = task_name
+    else:
+        try:
+            target_column = target_column_for_task(task_name)
+        except ValueError as exc:
+            parser.error(str(exc))
+        dataset_name = dataset_name_for_task(task_name)
+        run_target = task_name
     try:
         split_csv_paths = make_split_csv_paths(
-            "../data", task_name, args.split_type, args.split_seed
+            "../data", dataset_name, args.split_type, args.split_seed
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -132,8 +151,8 @@ if __name__ == "__main__":
     print(selected_gpu_names)
 
     # hyper parameter tuning
-    hp_save_dir = f"./graph_hyperopt/hp/dmpnn_{task_name}_{split_run_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    config_save_path = f"./{hp_save_dir}/{task_name}_b{args.batch_size}_dmpnn_best_hp_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
+    hp_save_dir = f"./graph_hyperopt/hp/dmpnn_{run_target}_{split_run_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    config_save_path = f"./{hp_save_dir}/{run_target}_b{args.batch_size}_dmpnn_best_hp_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
 
     # atom_descriptors_path が指定された場合、_train/_val のパスを導出する
     # 命名規則: {base}_atom_desc_train.pkl → {base}_atom_desc_val.pkl
@@ -175,7 +194,7 @@ if __name__ == "__main__":
     class_weight = None
     data_weights_path = None
     if args.dataset_type == 'classification':
-        train_labels = pd.read_csv(train_data_path)[base_task_name].to_numpy()
+        train_labels = pd.read_csv(train_data_path)[target_column].to_numpy()
         label_ds = tf.data.Dataset.from_tensor_slices(
             (np.zeros(len(train_labels)), train_labels)
         )
@@ -200,7 +219,7 @@ if __name__ == "__main__":
         '--config_save_path', config_save_path,
         '--epochs', str(args.epochs),
         '--smiles_columns', 'smiles',
-        '--target_columns', base_task_name,
+        '--target_columns', target_column,
         '--gpu', args.gpu,
         '--seed', str(args.seed)
     ]
@@ -225,7 +244,7 @@ if __name__ == "__main__":
         chemprop_hyperopt_module.hyperopt(hyperopt_args)
 
     # training
-    model_save_dir = f"./graph_hyperopt/trained/dmpnn_{task_name}_{split_run_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    model_save_dir = f"./graph_hyperopt/trained/dmpnn_{run_target}_{split_run_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     tr_args = [
         '--data_path', train_data_path,
         '--separate_val_path', val_data_path,
@@ -238,7 +257,7 @@ if __name__ == "__main__":
         '--epochs', str(args.epochs),
         '--save_dir', model_save_dir ,
         '--smiles_columns', 'smiles',
-        '--target_columns', base_task_name,
+        '--target_columns', target_column,
         '--gpu', args.gpu,
         '--seed', str(args.seed)
     ]
@@ -265,7 +284,7 @@ if __name__ == "__main__":
     # breakpoint()
     # train_args.task_names = data.target_names
     if not hasattr(train_args, 'task_names') or train_args.task_names is None:
-        train_args.task_names = [base_task_name] if isinstance(base_task_name, str) else base_task_name
+        train_args.task_names = [target_column]
         print(f"Set task_names to: {train_args.task_names}")
 
     # cross_validate.py と同等の処理: atom_features_size を train_args に保存し
@@ -328,7 +347,7 @@ if __name__ == "__main__":
 
     # Chemprop names this argument --test_path, but the input here is validation data.
     validation_prediction_path = (
-        f"{model_save_dir}/validation_prediction_{task_name}_{split_run_name}.csv"
+        f"{model_save_dir}/validation_prediction_{run_target}_{split_run_name}.csv"
     )
     predict_args_list = [
         '--test_path', val_data_path,
@@ -336,7 +355,6 @@ if __name__ == "__main__":
         '--preds_path', validation_prediction_path,
         # '--features_generator', args.features_generator,
         '--smiles_column', 'smiles',
-        # '--target_columns', task_name,
         '--gpu', args.gpu
     ]
     if atom_desc_val_path is not None:
@@ -347,9 +365,9 @@ if __name__ == "__main__":
     with trusted_chemprop_checkpoint_loading():
         make_predictions(predict_args)
 
-    y_score = pd.read_csv(validation_prediction_path)[base_task_name]
+    y_score = pd.read_csv(validation_prediction_path)[target_column]
     y_preds = np.where(y_score > 0.5, 1, 0)
-    y_val = pd.read_csv(val_data_path)[base_task_name]
+    y_val = pd.read_csv(val_data_path)[target_column]
 
     record_exp_result(
         '346038581243336323' if args.dataset_type == "regression" else '645489900222138469',
@@ -398,7 +416,11 @@ if __name__ == "__main__":
         },
         # tags
         {
-            "target": task_name,
+            "dataset": dataset_name,
+            "target": target_column,
+            "target_unit": (
+                None if legacy_target_name != task_name else target_unit(task_name)
+            ),
             "explanatory_val": "graph",
             "gpu_names": selected_gpu_names,
             "model_name": 'chemprops',

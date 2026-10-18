@@ -53,7 +53,8 @@ poetry install
 # Dataset
 All datasets used in the manuscript are generated with the following command. Dataset splitting is also performed.
 
-[task_name] accepts one of the following: FreeSolv, ESOL, Lipo, BBBP, hERG, P-gp, CYP3A4
+[task_name] accepts one of the following: FreeSolv, ESOL, Lipo, BBBP, hERG,
+P-gp, CYP3A4, QM9_homo, QM9_lumo, QM9_mu
 
 ```
 docker exec -w /chemAutoVision/src [container_id] python3 generate_data.py --task_name [task name]
@@ -80,7 +81,10 @@ The outputs include the scaffold method and seed so that they never overwrite ra
 | Split CSVs | `/chemAutoVision/data/{train,val,test}_[task_name]_img.csv` | `/chemAutoVision/data/{train,val,test}_balanced_scaffold_seed1_[task_name]_img.csv` |
 | Images | `/chemAutoVision/data/images/[task_name]` | `/chemAutoVision/data/images/balanced_scaffold_seed1_[task_name]` |
 
-The images are written to a separate directory because the image file names are derived from the post-split row index, which differs between the two strategies.
+The images are written to a separate directory because the legacy dataset image
+file names are derived from the post-split row index, which differs between the
+two strategies. QM9 uses a canonical-SMILES hash as the image file name so
+images can be reused safely within the same split strategy.
 
 When training a model on a balanced-scaffold dataset, pass the same `--split_type balanced_scaffold --split_seed 1` to the training scripts so that they load the corresponding dataset. Some scaffold distributions can make a requested fold empty; data generation fails early in that case instead of creating an unusable dataset. Seed `1` has been validated for FreeSolv.
 
@@ -162,6 +166,18 @@ docker exec  -w /chemAutoVision/src [container_id] \
         --execute_data_aug 
 ```
 
+```
+# QM9 image regression
+python3 experiment_image_regressor.py \
+    --gpu 0 --task_name QM9_homo \
+    --epochs 200 --model_name autokeras --batch_size 8 --max_trials 100 --seed 99
+
+# QM9 graph regression
+python3 experiment_graph.py \
+    --gpu 0 --task_name QM9_homo --dataset_type regression \
+    --batch_size 8 --num_iter 20 --seed 99
+```
+
 # Validation Prediction
 After training, each candidate model is evaluated on the validation data. The resulting predictions and corresponding ground-truth values are stored under `/chemAutoVision/results`, and the `val_*` metrics are recorded in MLflow.
 
@@ -179,6 +195,12 @@ python3 evaluate.py dry-run
 python3 evaluate.py validate --gpu 0
 python3 evaluate.py select
 python3 evaluate.py test --gpu 0
+```
+
+QM9 evaluation is selected explicitly by task name, for example:
+
+```
+python3 evaluate.py all --gpu 0 --task_name QM9_homo
 ```
 
 `dry-run` checks that every expected training condition and saved model exists

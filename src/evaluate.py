@@ -38,6 +38,11 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from data.dataset_registry import (
+    dataset_name_for_task,
+    target_column_for_task,
+    task_name_from_dataset_target,
+)
 from settings import IMG_SIZE
 from utils.split import BALANCED_SCAFFOLD_SPLIT_TYPE, make_split_prefix
 
@@ -81,6 +86,7 @@ RESULT_COLUMNS = (
     "family",
     "model_type",
     "task_type",
+    "dataset",
     "target",
     "split_type",
     "split_seed",
@@ -114,6 +120,7 @@ TEST_RESULT_COLUMNS = (
     "family",
     "model_type",
     "task_type",
+    "dataset",
     "target",
     "split_type",
     "split_seed",
@@ -158,15 +165,27 @@ class Candidate:
     batch_size: int
     run_id: str
     model_path: Path
+    dataset: str = ""
 
     @property
     def model_type(self) -> str:
         return MODEL_TYPES[self.family]
 
     @property
+    def dataset_name(self) -> str:
+        """Physical dataset name; legacy runs used the target as this value."""
+
+        return self.dataset or self.target
+
+    @property
+    def task_name(self) -> str:
+        return task_name_from_dataset_target(self.dataset_name, self.target)
+
+    @property
     def evaluation_key(self) -> str:
         parts = (
             self.family,
+            self.dataset_name,
             self.target,
             self.split_type,
             str(self.split_seed or "none"),
@@ -181,6 +200,7 @@ class Candidate:
         return "|".join(
             (
                 self.family,
+                self.dataset_name,
                 self.target,
                 self.split_type,
                 str(self.split_seed or "none"),
@@ -201,7 +221,9 @@ def _optional_int(value: object) -> int | None:
     return None if not text else int(float(text))
 
 
-def task_type_for_target(target: str) -> str:
+def task_type_for_target(target: str, dataset: str | None = None) -> str:
+    if dataset == "QM9" and target in {"homo", "lumo", "mu"}:
+        return "regression"
     if target in CLASSIFICATION_TARGETS:
         return "classification"
     if target in REGRESSION_TARGETS:
@@ -292,9 +314,11 @@ def _candidate_from_mlflow_run(
         return None
 
     target = _clean(tags.get("target"))
-    if target not in CLASSIFICATION_TARGETS | REGRESSION_TARGETS:
+    dataset = _clean(tags.get("dataset")) or target
+    try:
+        task_type = task_type_for_target(target, dataset)
+    except ValueError:
         return None
-    task_type = task_type_for_target(target)
     if task_type == "classification" and not _clean(params.get("class_weight")):
         return None
 
@@ -334,6 +358,7 @@ def _candidate_from_mlflow_run(
         batch_size=batch_size,
         run_id=str(run.info.run_id),
         model_path=model_path,
+        dataset=dataset,
     )
 
 
@@ -376,7 +401,7 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
             )
         if args.family and candidate.family not in args.family:
             continue
-        if args.target and candidate.target not in args.target:
+        if getattr(args, "task_name", None) and candidate.task_name not in args.task_name:
             continue
         if args.split_type and candidate.split_type not in args.split_type:
             continue
@@ -384,6 +409,7 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
             continue
         key = (
             candidate.family,
+            candidate.dataset_name,
             candidate.target,
             candidate.split_type,
             candidate.split_seed,
@@ -401,6 +427,7 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
         candidates,
         key=lambda item: (
             family_order[item.family],
+            item.dataset_name,
             item.target,
             item.split_type,
             item.split_seed or -1,
@@ -487,14 +514,16 @@ def select_best_rows(
     grouped: dict[str, list[dict[str, str]]] = {}
     for source_row in rows:
         row = dict(source_row)
+        dataset = row.get("dataset") or row.get("target", "")
         group = "|".join(
-            str(row.get(name, ""))
-            for name in (
-                "family",
-                "target",
-                "split_type",
-                "split_seed",
-                "training_seed",
+            str(value)
+            for value in (
+                row.get("family", ""),
+                dataset,
+                row.get("target", ""),
+                row.get("split_type", ""),
+                row.get("split_seed", ""),
+                row.get("training_seed", ""),
             )
         )
         grouped.setdefault(group, [])
@@ -576,7 +605,7 @@ def _subset_sha256(frame: pd.DataFrame, target: str) -> str:
 
 def _dataset_pickle_path(candidate: Candidate) -> Path:
     prefix = make_split_prefix(candidate.split_type, candidate.split_seed)
-    return REPO_ROOT / "data" / f"{prefix}{candidate.target}_img.pkl"
+    return REPO_ROOT / "data" / f"{prefix}{candidate.dataset_name}_img.pkl"
 
 
 def _load_subset_frame(candidate: Candidate, subset: str) -> tuple[pd.DataFrame, Path]:
@@ -881,6 +910,7 @@ def run_validation(
             "family": candidate.family,
             "model_type": candidate.model_type,
             "task_type": candidate.task_type,
+            "dataset": candidate.dataset_name,
             "target": candidate.target,
             "split_type": candidate.split_type,
             "split_seed": candidate.split_seed or "",
@@ -1029,7 +1059,14 @@ def run_selection(args: argparse.Namespace) -> list[dict[str, str]]:
     _require_finished_runs(mlflow, (row.get("run_id", "") for row in rows))
     selected, ranks = select_best_rows(rows)
     selected_path = args.results_dir / "selected_models.csv"
-    if any((args.family, args.target, args.split_type, args.training_seed)):
+    if any(
+        (
+            args.family,
+            getattr(args, "task_name", None),
+            args.split_type,
+            args.training_seed,
+        )
+    ):
         selected_groups = {row["selection_group"] for row in selected}
         retained = [
             row
@@ -1078,6 +1115,7 @@ def _candidate_from_result_row(row: Mapping[str, str]) -> Candidate:
         batch_size=int(row["batch_size"]),
         run_id=row.get("run_id", ""),
         model_path=Path(row["model_path"]),
+        dataset=row.get("dataset", ""),
     )
 
 
@@ -1086,7 +1124,14 @@ def _result_row_matches_filters(
 ) -> bool:
     return not (
         (args.family and row.get("family") not in args.family)
-        or (args.target and row.get("target") not in args.target)
+        or (
+            getattr(args, "task_name", None)
+            and task_name_from_dataset_target(
+                row.get("dataset") or row.get("target", ""),
+                row.get("target", ""),
+            )
+            not in args.task_name
+        )
         or (args.split_type and row.get("split_type") not in args.split_type)
         or (
             args.training_seed
@@ -1255,6 +1300,7 @@ def write_test_summary(test_metrics_path: Path, output_path: Path) -> None:
     ]
     summary_columns = (
         "model_type",
+        "dataset",
         "target",
         "task_type",
         "split_type",
@@ -1271,6 +1317,7 @@ def write_test_summary(test_metrics_path: Path, output_path: Path) -> None:
             row.get(name, "")
             for name in (
                 "model_type",
+                "dataset",
                 "target",
                 "task_type",
                 "split_type",
@@ -1279,7 +1326,7 @@ def write_test_summary(test_metrics_path: Path, output_path: Path) -> None:
         )
         grouped.setdefault(key, []).append(row)
     for key, group_rows in sorted(grouped.items()):
-        task_type = key[2]
+        task_type = key[3]
         metric_names = (
             CLASSIFICATION_METRIC_NAMES
             if task_type == "classification"
@@ -1293,10 +1340,11 @@ def write_test_summary(test_metrics_path: Path, output_path: Path) -> None:
             summaries.append(
                 {
                     "model_type": key[0],
-                    "target": key[1],
+                    "dataset": key[1],
+                    "target": key[2],
                     "task_type": task_type,
-                    "split_type": key[3],
-                    "data_augmentation": key[4],
+                    "split_type": key[4],
+                    "data_augmentation": key[5],
                     "metric": f"test_{metric_name}",
                     "n_seeds": len(values),
                     "mean": float(values.mean()),
@@ -1323,15 +1371,24 @@ def audit_candidates(
     missing_conditions: list[tuple[object, ...]] = []
     if args is not None:
         families = tuple(args.family or SUPPORTED_FAMILIES)
-        targets = tuple(
-            args.target or sorted(CLASSIFICATION_TARGETS | REGRESSION_TARGETS)
-        )
+        requested_tasks = tuple(getattr(args, "task_name", None) or ())
+        if requested_tasks:
+            dataset_targets = tuple(
+                (
+                    dataset_name_for_task(task_name),
+                    target_column_for_task(task_name),
+                )
+                for task_name in requested_tasks
+            )
+        else:
+            targets = tuple(sorted(CLASSIFICATION_TARGETS | REGRESSION_TARGETS))
+            dataset_targets = tuple((target, target) for target in targets)
         split_types = tuple(args.split_type or ("random", BALANCED_SCAFFOLD_SPLIT_TYPE))
         training_seeds = tuple(args.training_seed or sorted(EXPECTED_TRAINING_SEEDS))
         expected = {
-            (family, target, split_type, seed, batch_size)
+            (family, dataset, target, split_type, seed, batch_size)
             for family in families
-            for target in targets
+            for dataset, target in dataset_targets
             for split_type in split_types
             for seed in training_seeds
             for batch_size in EXPECTED_BATCH_SIZES
@@ -1339,6 +1396,7 @@ def audit_candidates(
         actual = {
             (
                 item.family,
+                item.dataset_name,
                 item.target,
                 item.split_type,
                 item.training_seed,
@@ -1395,7 +1453,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--family", action="append", choices=SUPPORTED_FAMILIES)
-    parser.add_argument("--target", action="append")
+    parser.add_argument("--task_name", action="append")
     parser.add_argument(
         "--split-type",
         action="append",
