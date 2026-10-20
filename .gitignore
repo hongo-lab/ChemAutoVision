@@ -26,3 +26,7 @@ docs/
 /src/tests/test_check_model_inventory.py
 /src/tests/test_copy_missing_models.py
 /src/tests/test_reset_evaluation_records.py
+
+# Local flattened MLflow exports; the compact paper CSV is version-controlled.
+/src/notebooks/automl_cls_results.csv
+/src/notebooks/automl_reg_results.csv
