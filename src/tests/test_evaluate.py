@@ -46,9 +46,16 @@ def candidate(family: str = "chem_autovision") -> Candidate:
 
 
 class FakeRun:
-    def __init__(self, run_id: str, metrics=None, tags=None, params=None):
+    def __init__(
+        self,
+        run_id: str,
+        metrics=None,
+        tags=None,
+        params=None,
+        experiment_id="source-experiment",
+    ):
         self.info = SimpleNamespace(
-            run_id=run_id, status="FINISHED", experiment_id="source-experiment"
+            run_id=run_id, status="FINISHED", experiment_id=experiment_id
         )
         self.data = SimpleNamespace(
             metrics=dict(metrics or {}),
@@ -71,6 +78,9 @@ class FakeMlflow:
         self.artifacts = []
         self.runs = {run.info.run_id: run for run in (runs or [FakeRun("source-run")])}
         self.active_run_id = None
+        self.destination_experiment = SimpleNamespace(
+            experiment_id="destination-experiment", name="val_automl_cls"
+        )
 
     def get_run(self, run_id):
         if run_id not in self.runs:
@@ -78,16 +88,33 @@ class FakeMlflow:
         return self.runs[run_id]
 
     def start_run(self, **kwargs):
-        run_id = kwargs["run_id"]
+        run_id = kwargs.get("run_id")
+        if run_id is None:
+            run_id = f"evaluation-run-{len(self.runs)}"
+            self.runs[run_id] = FakeRun(
+                run_id,
+                experiment_id=kwargs["experiment_id"],
+            )
         self.active_run_id = run_id
         return self.runs[run_id]
+
+    def set_experiment(self, name):
+        self.destination_experiment.name = name
+        return self.destination_experiment
+
+    def search_runs(self, experiment_ids, output_format, order_by):
+        return [
+            run
+            for run in self.runs.values()
+            if str(run.info.experiment_id) in {str(value) for value in experiment_ids}
+        ]
 
     def set_tags(self, tags):
         self.tags.append(tags)
         self.runs[self.active_run_id].data.tags.update(tags)
 
     def log_params(self, params):
-        pass
+        self.runs[self.active_run_id].data.params.update(params)
 
     def log_metrics(self, metrics):
         self.logged_metric_dicts.append(metrics)
@@ -121,6 +148,7 @@ def evaluation_args(results_dir: Path):
         tracking_uri="unused",
         source_classification_experiment_id="classification-experiment",
         source_regression_experiment_id="regression-experiment",
+        destination_experiment_name="val_automl_cls",
         allow_incomplete_groups=False,
         family=None,
         target=None,
@@ -278,6 +306,34 @@ def test_mlflow_training_run_is_converted_to_candidate(tmp_path: Path):
     assert result.run_id == "run"
     assert result.model_type == "ChemAutoVision"
     assert result.model_path == model.resolve()
+
+
+def test_mutagenicity_training_run_is_classification_candidate(tmp_path: Path):
+    model = tmp_path / "mutagenicity.h5"
+    model.write_bytes(b"model")
+    run = SimpleNamespace(
+        info=SimpleNamespace(run_id="mutagenicity-run", status="FINISHED"),
+        data=SimpleNamespace(
+            params={
+                "seed": "42",
+                "batch_size": "8",
+                "class_weight": "0:1, 1:1",
+            },
+            tags={
+                "model_name": "autokeras",
+                "target": "Mutagenicity",
+                "model_path": str(model),
+                "execute_data_aug": "True",
+            },
+            metrics={},
+        ),
+    )
+
+    result = _candidate_from_mlflow_run(run, repo_root=tmp_path)
+
+    assert result is not None
+    assert result.task_type == "classification"
+    assert result.dataset_name == "Mutagenicity"
 
 
 def test_qm9_mlflow_run_uses_shared_dataset_and_selected_target(tmp_path: Path):
@@ -453,12 +509,46 @@ def test_validation_uses_validation_dataset_and_logs_only_val_metrics(tmp_path: 
         "val_r2",
         "val_inference_time_sec",
     }
-    assert fake_mlflow.artifacts == []
+    assert len(fake_mlflow.artifacts) == 1
+    assert rows[0]["evaluation_run_id"].startswith("evaluation-run-")
+    assert fake_mlflow.runs[model.run_id].data.metrics == {}
     validation_tags = {
         key: value for tag_batch in fake_mlflow.tags for key, value in tag_batch.items()
     }
     assert validation_tags["val_prediction_path"] == rows[0]["prediction_path"]
     assert Path(validation_tags["val_prediction_path"]).is_file()
+
+
+def test_validation_reuses_matching_destination_run(tmp_path: Path):
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"model")
+    model = regression_candidate(model_path)
+    frame = pd.DataFrame(
+        {"smiles": ["a", "b"], "FreeSolv": [1.0, 3.0]}, index=[1, 2]
+    )
+    prediction = (
+        frame,
+        np.array([1.0, 3.0]),
+        np.array([1.5, 2.5]),
+        tmp_path / "validation.csv",
+        "fingerprint",
+        0.25,
+    )
+    fake_mlflow = FakeMlflow()
+    args = evaluation_args(tmp_path / "results")
+
+    with (
+        patch.object(evaluate, "_set_tracking_uri", return_value=fake_mlflow),
+        patch.object(
+            evaluate, "predict_candidate", return_value=prediction
+        ) as predict_mock,
+    ):
+        first = run_validation(args, [model])
+        second = run_validation(args, [model])
+
+    predict_mock.assert_called_once()
+    assert first[0]["evaluation_run_id"] == second[0]["evaluation_run_id"]
+    assert second[0]["validation_metric_source"] == "val_automl_cls"
 
 
 def test_test_evaluation_uses_test_dataset_and_logs_only_test_metrics(tmp_path: Path):
@@ -651,7 +741,7 @@ def test_test_evaluation_records_missing_selected_model_and_raises_error(
     assert "missing-selected-model.pt" in rows[0]["error"]
 
 
-def test_validation_uses_mlflow_metrics_instead_of_csv_checkpoint_status(
+def test_validation_recalculates_metrics_instead_of_using_source_run_metrics(
     tmp_path: Path,
 ):
     first_model_path = tmp_path / "finished.pt"
@@ -749,17 +839,17 @@ def test_validation_uses_mlflow_metrics_instead_of_csv_checkpoint_status(
             evaluation_args(results_dir), [finished_candidate, retry_candidate]
         )
 
-    assert predicted_source_run_ids == ["retry-source-run"]
+    assert predicted_source_run_ids == ["finished-source-run", "retry-source-run"]
     assert len(processed) == 2
     assert all(row["status"] == "FINISHED" for row in processed)
     with validation_path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows_by_key = {row["evaluation_key"]: row for row in csv.DictReader(handle)}
-    assert rows_by_key[finished_candidate.evaluation_key]["val_rmse"] == "0.1"
+    assert rows_by_key[finished_candidate.evaluation_key]["val_rmse"] == "0.5"
     assert rows_by_key[retry_candidate.evaluation_key]["status"] == "FINISHED"
     assert rows_by_key[retry_candidate.evaluation_key]["val_rmse"] == "0.5"
 
 
-def test_validation_reuses_training_metrics_without_prediction(tmp_path: Path):
+def test_validation_does_not_reuse_training_metrics(tmp_path: Path):
     model_path = tmp_path / "model.pt"
     model_path.write_bytes(b"model")
     model = regression_candidate(model_path)
@@ -774,20 +864,33 @@ def test_validation_reuses_training_metrics_without_prediction(tmp_path: Path):
         },
     )
     fake_mlflow = FakeMlflow([run])
+    frame = pd.DataFrame(
+        {"smiles": ["a", "b"], "FreeSolv": [1.0, 3.0]}, index=[1, 2]
+    )
+    prediction = (
+        frame,
+        np.array([1.0, 3.0]),
+        np.array([1.5, 2.5]),
+        tmp_path / "validation.csv",
+        "fingerprint",
+        0.25,
+    )
 
     with (
         patch.object(evaluate, "_set_tracking_uri", return_value=fake_mlflow),
-        patch.object(evaluate, "predict_candidate") as predict_mock,
+        patch.object(
+            evaluate, "predict_candidate", return_value=prediction
+        ) as predict_mock,
     ):
         rows = run_validation(evaluation_args(tmp_path / "results"), [model])
 
-    predict_mock.assert_not_called()
-    assert rows[0]["val_rmse"] == 0.4
-    assert rows[0]["validation_metric_source"] == "training_run"
-    assert fake_mlflow.logged_metric_dicts == []
+    predict_mock.assert_called_once()
+    assert rows[0]["val_rmse"] == pytest.approx(0.5)
+    assert rows[0]["validation_metric_source"] == "evaluate.py"
+    assert run.data.metrics["val_rmse"] == 0.4
 
 
-def test_validation_preserves_existing_metric_and_logs_only_missing(tmp_path: Path):
+def test_validation_logs_all_recalculated_metrics_to_destination(tmp_path: Path):
     model_path = tmp_path / "model.pt"
     model_path.write_bytes(b"model")
     model = regression_candidate(model_path)
@@ -810,10 +913,10 @@ def test_validation_preserves_existing_metric_and_logs_only_missing(tmp_path: Pa
     ):
         rows = run_validation(evaluation_args(tmp_path / "results"), [model])
 
-    assert rows[0]["val_rmse"] == 9.0
-    assert rows[0]["validation_metric_source"] == "mixed"
-    assert "val_rmse" not in fake_mlflow.logged_metric_dicts[0]
+    assert rows[0]["val_rmse"] == pytest.approx(0.5)
+    assert rows[0]["validation_metric_source"] == "evaluate.py"
     assert set(fake_mlflow.logged_metric_dicts[0]) == {
+        "val_rmse",
         "val_mse",
         "val_mae",
         "val_r2",

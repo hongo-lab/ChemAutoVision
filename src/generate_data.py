@@ -29,7 +29,8 @@ from utils.split import BALANCED_SCAFFOLD_SPLIT_TYPE, make_split_prefix
 RAW_HERG_CSV_PATH = "../data/raw/hERG_inhibition/hERG.csv"
 RAW_CYP3A4_CSV_PATH = "../data/raw/CYP3A4_inhibition/CYP3A4.csv"
 RAW_PGP_CSV_PATH = "../data/raw/P-gp_substrate/P-gp.csv"
-CLASSIFICATION_TASKS = {"BBBP", "hERG", "P-gp", "CYP3A4"}
+RAW_MUTAGENICITY_CSV_PATH = "../data/raw/Mutagenicity.csv"
+CLASSIFICATION_TASKS = {"BBBP", "hERG", "P-gp", "CYP3A4", "Mutagenicity"}
 
 
 def _generate_image(
@@ -129,7 +130,33 @@ def _preprocess_smiles(smiles: str) -> str:
     return smiles
 
 
-def _load_data(task_name: str) -> pd.DataFrame:
+def _load_mutagenicity_data(path: str | Path) -> pd.DataFrame:
+    """Adapt the Hansen CSV schema to the shared generation pipeline."""
+
+    datasets = pd.read_csv(path)
+    datasets["source_index"] = datasets.index
+    datasets = datasets.rename(
+        columns={"Canonical_Smiles": "smiles", "Activity": "Mutagenicity"}
+    )
+    required = {"smiles", "Mutagenicity"}
+    missing = sorted(required.difference(datasets.columns))
+    if missing:
+        raise ValueError(
+            "Mutagenicity CSV is missing required column(s): " + ", ".join(missing)
+        )
+    labels = pd.to_numeric(datasets["Mutagenicity"], errors="raise")
+    invalid = sorted(set(labels.dropna().unique()).difference({0, 1}))
+    if invalid:
+        raise ValueError(f"Mutagenicity labels must be 0 or 1; found {invalid}")
+    if labels.isna().any():
+        raise ValueError("Mutagenicity labels contain missing values")
+    datasets["Mutagenicity"] = labels.astype(int)
+    return datasets
+
+
+def _load_data(
+    task_name: str, raw_data_path: str | Path | None = None
+) -> pd.DataFrame:
     if task_name == "QM9":
         datasets = load_qm9_dataframe()
     elif task_name == "FreeSolv":
@@ -150,6 +177,10 @@ def _load_data(task_name: str) -> pd.DataFrame:
         datasets = pd.read_csv(RAW_PGP_CSV_PATH)
     elif task_name == "hERG":
         datasets = pd.read_csv(RAW_HERG_CSV_PATH)
+    elif task_name == "Mutagenicity":
+        datasets = _load_mutagenicity_data(
+            raw_data_path or RAW_MUTAGENICITY_CSV_PATH
+        )
     elif task_name == "BBBP":
         _, datasets, _ = dc.molnet.load_bbbp(
             featurizer=dc.feat.RawFeaturizer(), split=None
@@ -370,6 +401,11 @@ def main() -> None:
         action="store_true",
         help="regenerate molecular images that already exist",
     )
+    parser.add_argument(
+        "--raw-data-path",
+        type=Path,
+        help="override the raw input CSV path (supported for Mutagenicity)",
+    )
     args = parser.parse_args()
     task_name = args.task_name
     dataset_name = dataset_name_for_task(task_name)
@@ -381,7 +417,7 @@ def main() -> None:
 
     output_path = f"../data/{split_prefix}{dataset_name}_img.pkl"
 
-    _df = _load_data(dataset_name)
+    _df = _load_data(dataset_name, args.raw_data_path)
     loader_count = len(_df)
     target_columns = target_columns_for_generation(task_name)
 
