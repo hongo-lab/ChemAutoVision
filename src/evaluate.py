@@ -1,11 +1,8 @@
 """Select saved models by validation metrics and test only the winners.
 
-Training runs in MLflow are the source of truth.  Existing ``val_*`` metrics
-are preserved; when they are missing, this program calculates only the missing
-validation metrics and adds them to the same training run.  It then selects the
-best batch size per model/target/split/training-seed group and adds ``test_*``
-metrics only to the selected training runs.  No evaluation-only MLflow runs are
-created.
+Training runs in MLflow provide the model path and training conditions.  The
+program recalculates validation metrics from the saved model and records them in
+dedicated evaluation runs, leaving the source training runs unchanged.
 
 Examples (run from ``src`` or the repository root)::
 
@@ -49,11 +46,14 @@ from utils.split import BALANCED_SCAFFOLD_SPLIT_TYPE, make_split_prefix
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_FAMILIES = ("chem_autovision", "resnet18_aug", "dmpnn")
-CLASSIFICATION_TARGETS = frozenset(("BBBP", "P-gp", "CYP3A4", "hERG"))
+CLASSIFICATION_TARGETS = frozenset(
+    ("BBBP", "P-gp", "CYP3A4", "hERG", "Mutagenicity")
+)
 REGRESSION_TARGETS = frozenset(("FreeSolv", "ESOL", "Lipo"))
 EXPECTED_BATCH_SIZES = frozenset((8, 16, 32, 64))
 EXPECTED_TRAINING_SEEDS = frozenset((10, 42, 99))
-EVALUATION_VERSION = "1"
+EVALUATION_VERSION = "2"
+DESTINATION_VALIDATION_EXPERIMENT = "val_automl_cls"
 SOURCE_CLASSIFICATION_EXP_ID = "645489900222138469"
 SOURCE_REGRESSION_EXP_ID = "346038581243336323"
 
@@ -81,6 +81,7 @@ REGRESSION_METRIC_NAMES = ("rmse", "mse", "mae", "r2")
 RESULT_COLUMNS = (
     "evaluation_key",
     "run_id",
+    "evaluation_run_id",
     "status",
     "error",
     "family",
@@ -366,9 +367,26 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
     """Discover and de-duplicate candidate models directly from MLflow."""
 
     mlflow = _set_tracking_uri(args.tracking_uri)
-    experiment_ids = (
-        args.source_classification_experiment_id,
-        args.source_regression_experiment_id,
+    requested_tasks = tuple(getattr(args, "task_name", None) or ())
+    requested_task_types = {
+        task_type_for_target(
+            target_column_for_task(task_name), dataset_name_for_task(task_name)
+        )
+        for task_name in requested_tasks
+    }
+    include_classification = (
+        not requested_task_types or "classification" in requested_task_types
+    )
+    include_regression = (
+        not requested_task_types or "regression" in requested_task_types
+    )
+    experiment_ids = tuple(
+        experiment_id
+        for experiment_id, included in (
+            (args.source_classification_experiment_id, include_classification),
+            (args.source_regression_experiment_id, include_regression),
+        )
+        if included
     )
     missing_experiments = [
         experiment_id
@@ -385,10 +403,15 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
         order_by=["attributes.start_time DESC"],
     )
     grouped: dict[tuple[object, ...], list[Candidate]] = {}
-    expected_task_by_experiment = {
-        str(args.source_classification_experiment_id): "classification",
-        str(args.source_regression_experiment_id): "regression",
-    }
+    expected_task_by_experiment = {}
+    if include_classification:
+        expected_task_by_experiment[str(args.source_classification_experiment_id)] = (
+            "classification"
+        )
+    if include_regression:
+        expected_task_by_experiment[str(args.source_regression_experiment_id)] = (
+            "regression"
+        )
     for run in runs:
         candidate = _candidate_from_mlflow_run(run)
         if candidate is None:
@@ -890,11 +913,80 @@ def _nonempty(values: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in values.items() if _clean(value)}
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _portable_model_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(path.resolve())
+
+
+def _validation_run_params(candidate: Candidate, source_run: Any) -> dict[str, object]:
+    """Copy the conditions needed to interpret an evaluation without old runs."""
+
+    source_params = dict(source_run.data.params)
+    source_tags = dict(source_run.data.tags)
+    params: dict[str, object] = {
+        "dataset": candidate.dataset_name,
+        "target": candidate.target,
+        "model_type": candidate.model_type,
+        "model_family": candidate.family,
+        "training_seed": candidate.training_seed,
+        "batch_size": candidate.batch_size,
+        "split_type": candidate.split_type,
+        "split_seed": candidate.split_seed if candidate.split_seed is not None else "",
+        "evaluation_split": "val",
+        "classification_threshold": (
+            0.5 if candidate.task_type == "classification" else ""
+        ),
+    }
+    for name, value in source_params.items():
+        if _clean(value):
+            params[f"source_{name}"] = value
+    for name in ("class_weight", "learning_rate", "optimizer", "epochs"):
+        value = source_params.get(name)
+        if _clean(value):
+            params[name] = value
+    for name in ("execute_data_aug", "img_size", "model_name"):
+        value = source_tags.get(name)
+        if _clean(value):
+            params[name] = value
+    return _nonempty(params)
+
+
+def _destination_validation_runs(mlflow: Any, experiment_id: str) -> dict[str, Any]:
+    """Return the newest completed evaluation run for each evaluation key."""
+
+    runs = mlflow.search_runs(
+        experiment_ids=[str(experiment_id)],
+        output_format="list",
+        order_by=["attributes.start_time DESC"],
+    )
+    found: dict[str, Any] = {}
+    for run in runs:
+        tags = dict(run.data.tags)
+        key = _clean(tags.get("evaluation_key"))
+        version = _clean(tags.get("evaluation_version"))
+        status = _clean(getattr(run.info, "status", "")).upper()
+        if key and version == EVALUATION_VERSION and status == "FINISHED":
+            found.setdefault(key, run)
+    return found
+
+
 def run_validation(
     args: argparse.Namespace, candidates: Sequence[Candidate]
 ) -> list[dict[str, object]]:
     mlflow = _set_tracking_uri(args.tracking_uri)
     source_runs = _require_finished_runs(mlflow, (item.run_id for item in candidates))
+    experiment = mlflow.set_experiment(args.destination_experiment_name)
+    destination_runs = _destination_validation_runs(mlflow, experiment.experiment_id)
     output_path = args.results_dir / "validation_metrics.csv"
     all_rows: list[dict[str, object]] = []
     for index, candidate in enumerate(candidates, start=1):
@@ -917,6 +1009,7 @@ def run_validation(
             "training_seed": candidate.training_seed,
             "batch_size": candidate.batch_size,
             "run_id": candidate.run_id,
+            "evaluation_run_id": "",
             "model_path": str(candidate.model_path),
         }
         try:
@@ -924,112 +1017,125 @@ def run_validation(
                 raise FileNotFoundError(f"model not found: {candidate.model_path}")
             source_run = source_runs[candidate.run_id]
             source_tags = dict(source_run.data.tags)
-            source_metrics = dict(source_run.data.metrics)
             augmentation = data_augmentation_for(candidate, source_tags)
-            if augmentation == "unknown":
-                raise ValueError(
-                    "data augmentation setting is unknown; source run has no execute_data_aug tag"
-                )
             required_names = _metric_names(candidate.task_type, "val")
-            existing_metrics = {
-                name: float(source_metrics[name])
-                for name in required_names
-                if name in source_metrics and np.isfinite(source_metrics[name])
-            }
-            missing_names = [
-                name for name in required_names if name not in existing_metrics
-            ]
-            calculated: dict[str, float] = {}
-            dataset_path: Path | str = _clean(source_tags.get("csv_path"))
-            fingerprint = _clean(source_tags.get("val_smiles_hash"))
-            prediction_path: Path | str = _clean(
-                source_tags.get("validation_result_csv_path")
+            existing_run = destination_runs.get(candidate.evaluation_key)
+            existing_metrics = (
+                dict(existing_run.data.metrics) if existing_run is not None else {}
             )
-            sample_count: int | str = ""
-            elapsed: float | str = source_metrics.get("val_inference_time_sec", "")
-            metric_source = "training_run"
-            tags: dict[str, object] = {
-                "evaluation_version": EVALUATION_VERSION,
-                "selection_group": candidate.selection_group,
-            }
-            if missing_names:
-                (
-                    frame,
-                    y_true,
-                    y_score,
-                    dataset_path,
-                    fingerprint,
-                    elapsed,
-                ) = predict_candidate(candidate, "val", args.results_dir)
-                calculated = {
-                    f"val_{name}": value
-                    for name, value in calculate_metrics(
-                        candidate.task_type, y_true, y_score
-                    ).items()
+            if (
+                existing_run is not None
+                and not args.overwrite
+                and all(name in existing_metrics for name in required_names)
+            ):
+                existing_tags = dict(existing_run.data.tags)
+                final_metrics = {
+                    name: float(existing_metrics[name]) for name in required_names
                 }
-                prediction_path = (
-                    args.results_dir
-                    / "predictions"
-                    / "validation"
-                    / f"{candidate.evaluation_key}.csv"
-                )
-                _write_prediction_csv(
-                    prediction_path, frame, y_true, y_score, candidate.task_type
-                )
-                if candidate.task_type == "classification":
-                    roc_path = (
-                        args.results_dir
-                        / "plots"
-                        / "validation"
-                        / f"{candidate.evaluation_key}_roc.png"
-                    )
-                    _write_roc_curve(roc_path, y_true, y_score)
-                    tags["validation_roc_path"] = str(roc_path)
-                sample_count = len(y_true)
-                to_log = {name: calculated[name] for name in missing_names}
-                if "val_inference_time_sec" not in source_metrics:
-                    to_log["val_inference_time_sec"] = float(elapsed)
-                tags.update(
+                base.update(
                     {
-                        "validation_metric_source": (
-                            "mixed" if existing_metrics else "evaluate.py"
+                        "status": "FINISHED",
+                        "evaluation_run_id": str(existing_run.info.run_id),
+                        "dataset_path": _clean(existing_tags.get("val_dataset_path")),
+                        "dataset_sha256": _clean(
+                            existing_tags.get("val_dataset_sha256")
                         ),
-                        "validation_evaluated_at": datetime.now(
-                            timezone.utc
-                        ).isoformat(),
-                        "val_dataset_path": str(dataset_path),
-                        "val_dataset_sha256": fingerprint,
-                        "val_prediction_path": str(prediction_path),
-                        "val_sample_count": sample_count,
-                        "evaluation_gpu_names": _gpu_names(),
+                        "sample_count": _clean(existing_tags.get("val_sample_count")),
+                        "data_augmentation": augmentation,
+                        "prediction_path": _clean(
+                            existing_tags.get("val_prediction_path")
+                        ),
+                        "val_inference_time_sec": existing_metrics.get(
+                            "val_inference_time_sec", ""
+                        ),
+                        "validation_metric_source": "val_automl_cls",
+                        **final_metrics,
                     }
                 )
-                with mlflow.start_run(run_id=candidate.run_id):
-                    mlflow.log_metrics(to_log)
-                    mlflow.set_tags(_nonempty(tags))
-                metric_source = "mixed" if existing_metrics else "evaluate.py"
-            else:
-                tags["validation_metric_source"] = "training_run"
-                with mlflow.start_run(run_id=candidate.run_id):
-                    mlflow.set_tags(_nonempty(tags))
+                _append_csv_row(output_path, RESULT_COLUMNS, base)
+                all_rows.append(base)
+                continue
+
+            (
+                frame,
+                y_true,
+                y_score,
+                dataset_path,
+                fingerprint,
+                elapsed,
+            ) = predict_candidate(candidate, "val", args.results_dir)
             final_metrics = {
-                name: (
-                    existing_metrics[name]
-                    if name in existing_metrics
-                    else calculated[name]
-                )
-                for name in required_names
+                f"val_{name}": value
+                for name, value in calculate_metrics(
+                    candidate.task_type, y_true, y_score
+                ).items()
             }
+            to_log = {**final_metrics, "val_inference_time_sec": float(elapsed)}
+            prediction_path = (
+                args.results_dir
+                / "predictions"
+                / "validation"
+                / f"{candidate.evaluation_key}.csv"
+            )
+            _write_prediction_csv(
+                prediction_path, frame, y_true, y_score, candidate.task_type
+            )
+            artifact_paths = [prediction_path]
+            tags: dict[str, object] = {
+                "evaluation_key": candidate.evaluation_key,
+                "evaluation_version": EVALUATION_VERSION,
+                "evaluation_kind": "saved_model_validation",
+                "source_run_id": candidate.run_id,
+                "source_experiment_id": getattr(
+                    source_run.info, "experiment_id", ""
+                ),
+                "selection_group": candidate.selection_group,
+                "model_path": _portable_model_path(candidate.model_path),
+                "model_sha256": _file_sha256(candidate.model_path),
+                "validation_metric_source": "evaluate.py",
+                "validation_evaluated_at": datetime.now(timezone.utc).isoformat(),
+                "val_dataset_path": str(dataset_path),
+                "val_dataset_sha256": fingerprint,
+                "val_prediction_path": str(prediction_path),
+                "val_sample_count": len(y_true),
+                "data_augmentation": augmentation,
+                "evaluation_gpu_names": _gpu_names(),
+            }
+            if candidate.task_type == "classification":
+                roc_path = (
+                    args.results_dir
+                    / "plots"
+                    / "validation"
+                    / f"{candidate.evaluation_key}_roc.png"
+                )
+                _write_roc_curve(roc_path, y_true, y_score)
+                tags["validation_roc_path"] = str(roc_path)
+                artifact_paths.append(roc_path)
+
+            run_name = (
+                f"{candidate.dataset_name}_{candidate.family}_"
+                f"seed{candidate.training_seed}_bs{candidate.batch_size}_val"
+            )
+            with mlflow.start_run(
+                experiment_id=experiment.experiment_id, run_name=run_name
+            ) as evaluation_run:
+                mlflow.log_params(_validation_run_params(candidate, source_run))
+                mlflow.log_metrics(to_log)
+                mlflow.set_tags(_nonempty(tags))
+                for artifact_path in artifact_paths:
+                    mlflow.log_artifact(str(artifact_path), artifact_path="validation")
+                evaluation_run_id = str(evaluation_run.info.run_id)
             base.update(
                 {
                     "status": "FINISHED",
+                    "evaluation_run_id": evaluation_run_id,
                     "dataset_path": str(dataset_path),
                     "dataset_sha256": fingerprint,
-                    "sample_count": sample_count,
+                    "sample_count": len(y_true),
                     "data_augmentation": augmentation,
                     "prediction_path": str(prediction_path),
                     "val_inference_time_sec": elapsed,
-                    "validation_metric_source": metric_source,
+                    "validation_metric_source": "evaluate.py",
                     **final_metrics,
                 }
             )
@@ -1438,6 +1544,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--results-dir", type=Path, default=REPO_ROOT / "results" / "evaluation"
     )
     parser.add_argument("--tracking-uri", default=str(REPO_ROOT / "mlruns"))
+    parser.add_argument(
+        "--destination-experiment-name",
+        default=DESTINATION_VALIDATION_EXPERIMENT,
+        help="MLflow experiment that receives newly calculated validation runs",
+    )
     parser.add_argument(
         "--source-classification-experiment-id",
         default=os.environ.get(
