@@ -27,9 +27,10 @@ import subprocess
 import sys
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -167,6 +168,10 @@ class Candidate:
     run_id: str
     model_path: Path
     dataset: str = ""
+    source_type: str = "mlflow"
+    source_params: Mapping[str, str] = field(default_factory=dict)
+    source_tags: Mapping[str, str] = field(default_factory=dict)
+    source_experiment_id: str = ""
 
     @property
     def model_type(self) -> str:
@@ -363,8 +368,174 @@ def _candidate_from_mlflow_run(
     )
 
 
+def _first_nonempty(row: Mapping[str, object], *names: str) -> str:
+    for name in names:
+        value = _clean(row.get(name))
+        if value:
+            return value
+    return ""
+
+
+def _candidate_from_classification_results_row(
+    row: Mapping[str, object], source_path: Path, repo_root: Path = REPO_ROOT
+) -> Candidate | None:
+    """Build a candidate from an exported historical classification result."""
+
+    if _clean(row.get("Status")).upper() != "FINISHED":
+        return None
+    model_name = _clean(row.get("model_name"))
+    if model_name == "autokeras":
+        family = "chem_autovision"
+    elif model_name == "resnet18" and _as_bool(row.get("execute_data_aug")) is True:
+        family = "resnet18_aug"
+    else:
+        return None
+
+    target = _clean(row.get("target"))
+    dataset = _clean(row.get("dataset")) or target
+    try:
+        task_type = task_type_for_target(target, dataset)
+    except ValueError:
+        return None
+    if task_type != "classification" or not _clean(row.get("class_weight")):
+        return None
+
+    raw_split = _first_nonempty(row, "data_split", "split_type") or "random"
+    try:
+        split_type = normalize_split_type(raw_split)
+    except ValueError:
+        return None
+    split_seed = _optional_int(_first_nonempty(row, "split_seed", "split_seed.1"))
+    if split_type == BALANCED_SCAFFOLD_SPLIT_TYPE and split_seed != 42:
+        return None
+
+    training_seed = _optional_int(
+        _first_nonempty(row, "seed", "training_seed", "ak_seed")
+    )
+    batch_size = _optional_int(row.get("batch_size"))
+    if (
+        training_seed not in EXPECTED_TRAINING_SEEDS
+        or batch_size not in EXPECTED_BATCH_SIZES
+    ):
+        return None
+
+    run_id = _clean(row.get("Run ID"))
+    if not run_id:
+        return None
+    model_path = resolve_candidate_model_path(
+        {"model_path_from_csv": _clean(row.get("model_path"))}, repo_root
+    )
+    parameter_names = (
+        "seed",
+        "training_seed",
+        "ak_seed",
+        "batch_size",
+        "class_weight",
+        "learning_rate",
+        "optimizer",
+        "epochs",
+        "patience",
+        "min_delta",
+        "max_trials",
+        "trial_timeout",
+        "early_stopping_metric",
+        "loss_func",
+        "do_rate",
+        "l1",
+        "daug_downscale_ratios",
+        "daug_is_concatenate_img",
+        "daug_is_hor_flip",
+        "daug_is_ver_flip",
+        "daug_rotate_angles",
+        "daug_rotation_factor",
+        "daug_zoom_factor",
+    )
+    source_params = {
+        name: _clean(row.get(name))
+        for name in parameter_names
+        if _clean(row.get(name))
+    }
+    source_tags = {
+        name: _clean(row.get(name))
+        for name in (
+            "model_name",
+            "target",
+            "dataset",
+            "data_split",
+            "split_seed",
+            "execute_data_aug",
+            "img_size",
+            "csv_path",
+            "model_path",
+        )
+        if _clean(row.get(name))
+    }
+    return Candidate(
+        family=family,
+        target=target,
+        task_type=task_type,
+        split_type=split_type,
+        split_seed=split_seed,
+        training_seed=training_seed,
+        batch_size=batch_size,
+        run_id=run_id,
+        model_path=model_path,
+        dataset=dataset,
+        source_type="classification_results_csv",
+        source_params=source_params,
+        source_tags=source_tags,
+        source_experiment_id=f"csv:{source_path.name}",
+    )
+
+
+def _filter_and_sort_candidates(
+    candidates: Iterable[Candidate], args: argparse.Namespace
+) -> list[Candidate]:
+    grouped: dict[tuple[object, ...], list[Candidate]] = {}
+    for candidate in candidates:
+        if args.family and candidate.family not in args.family:
+            continue
+        if (
+            getattr(args, "task_name", None)
+            and candidate.task_name not in args.task_name
+        ):
+            continue
+        if args.split_type and candidate.split_type not in args.split_type:
+            continue
+        if args.training_seed and candidate.training_seed not in args.training_seed:
+            continue
+        key = (
+            candidate.family,
+            candidate.dataset_name,
+            candidate.target,
+            candidate.split_type,
+            candidate.split_seed,
+            candidate.training_seed,
+            candidate.batch_size,
+        )
+        grouped.setdefault(key, []).append(candidate)
+
+    deduplicated = [
+        next((item for item in items if item.model_path.is_file()), items[0])
+        for items in grouped.values()
+    ]
+    family_order = {"dmpnn": 0, "chem_autovision": 1, "resnet18_aug": 2}
+    return sorted(
+        deduplicated,
+        key=lambda item: (
+            family_order[item.family],
+            item.dataset_name,
+            item.target,
+            item.split_type,
+            item.split_seed or -1,
+            item.training_seed,
+            item.batch_size,
+        ),
+    )
+
+
 def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
-    """Discover and de-duplicate candidate models directly from MLflow."""
+    """Discover candidates from MLflow or an exported classification CSV."""
 
     mlflow = _set_tracking_uri(args.tracking_uri)
     requested_tasks = tuple(getattr(args, "task_name", None) or ())
@@ -380,10 +551,17 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
     include_regression = (
         not requested_task_types or "regression" in requested_task_types
     )
+    classification_csv = getattr(args, "source_classification_results_csv", None)
+    include_classification_mlflow = (
+        include_classification and classification_csv is None
+    )
     experiment_ids = tuple(
         experiment_id
         for experiment_id, included in (
-            (args.source_classification_experiment_id, include_classification),
+            (
+                args.source_classification_experiment_id,
+                include_classification_mlflow,
+            ),
             (args.source_regression_experiment_id, include_regression),
         )
         if included
@@ -397,14 +575,18 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
         raise ValueError(
             "source MLflow experiment(s) not found: " + ", ".join(missing_experiments)
         )
-    runs = mlflow.search_runs(
-        experiment_ids=list(experiment_ids),
-        output_format="list",
-        order_by=["attributes.start_time DESC"],
+    runs = (
+        mlflow.search_runs(
+            experiment_ids=list(experiment_ids),
+            output_format="list",
+            order_by=["attributes.start_time DESC"],
+        )
+        if experiment_ids
+        else []
     )
-    grouped: dict[tuple[object, ...], list[Candidate]] = {}
+    discovered: list[Candidate] = []
     expected_task_by_experiment = {}
-    if include_classification:
+    if include_classification_mlflow:
         expected_task_by_experiment[str(args.source_classification_experiment_id)] = (
             "classification"
         )
@@ -422,42 +604,25 @@ def discover_candidates(args: argparse.Namespace) -> list[Candidate]:
                 f"MLflow run {run.info.run_id} has task type {candidate.task_type} "
                 f"but belongs to experiment {run.info.experiment_id}"
             )
-        if args.family and candidate.family not in args.family:
-            continue
-        if getattr(args, "task_name", None) and candidate.task_name not in args.task_name:
-            continue
-        if args.split_type and candidate.split_type not in args.split_type:
-            continue
-        if args.training_seed and candidate.training_seed not in args.training_seed:
-            continue
-        key = (
-            candidate.family,
-            candidate.dataset_name,
-            candidate.target,
-            candidate.split_type,
-            candidate.split_seed,
-            candidate.training_seed,
-            candidate.batch_size,
-        )
-        grouped.setdefault(key, []).append(candidate)
+        discovered.append(candidate)
 
-    candidates = [
-        next((item for item in items if item.model_path.is_file()), items[0])
-        for items in grouped.values()
-    ]
-    family_order = {"dmpnn": 0, "chem_autovision": 1, "resnet18_aug": 2}
-    return sorted(
-        candidates,
-        key=lambda item: (
-            family_order[item.family],
-            item.dataset_name,
-            item.target,
-            item.split_type,
-            item.split_seed or -1,
-            item.training_seed,
-            item.batch_size,
-        ),
-    )
+    if classification_csv is not None and include_classification:
+        classification_csv = Path(classification_csv).resolve()
+        if not classification_csv.is_file():
+            raise FileNotFoundError(
+                f"classification results CSV not found: {classification_csv}"
+            )
+        rows = pd.read_csv(
+            classification_csv, dtype=str, keep_default_na=False
+        ).to_dict("records")
+        for row in rows:
+            candidate = _candidate_from_classification_results_row(
+                row, classification_csv
+            )
+            if candidate is not None:
+                discovered.append(candidate)
+
+    return _filter_and_sort_candidates(discovered, args)
 
 
 def data_augmentation_for(
@@ -980,11 +1145,37 @@ def _destination_validation_runs(mlflow: Any, experiment_id: str) -> dict[str, A
     return found
 
 
+def _source_run_for_candidate(
+    candidate: Candidate, source_runs: Mapping[str, Any]
+) -> Any:
+    if candidate.source_type == "mlflow":
+        return source_runs[candidate.run_id]
+    return SimpleNamespace(
+        info=SimpleNamespace(
+            run_id=candidate.run_id,
+            status="FINISHED",
+            experiment_id=candidate.source_experiment_id,
+        ),
+        data=SimpleNamespace(
+            params=dict(candidate.source_params),
+            tags=dict(candidate.source_tags),
+            metrics={},
+        ),
+    )
+
+
 def run_validation(
     args: argparse.Namespace, candidates: Sequence[Candidate]
 ) -> list[dict[str, object]]:
     mlflow = _set_tracking_uri(args.tracking_uri)
-    source_runs = _require_finished_runs(mlflow, (item.run_id for item in candidates))
+    source_runs = _require_finished_runs(
+        mlflow,
+        (
+            item.run_id
+            for item in candidates
+            if item.source_type == "mlflow"
+        ),
+    )
     experiment = mlflow.set_experiment(args.destination_experiment_name)
     destination_runs = _destination_validation_runs(mlflow, experiment.experiment_id)
     output_path = args.results_dir / "validation_metrics.csv"
@@ -1015,7 +1206,7 @@ def run_validation(
         try:
             if not candidate.model_path.is_file():
                 raise FileNotFoundError(f"model not found: {candidate.model_path}")
-            source_run = source_runs[candidate.run_id]
+            source_run = _source_run_for_candidate(candidate, source_runs)
             source_tags = dict(source_run.data.tags)
             augmentation = data_augmentation_for(candidate, source_tags)
             required_names = _metric_names(candidate.task_type, "val")
@@ -1554,6 +1745,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=os.environ.get(
             "CHEMAUTOVISION_SOURCE_CLASSIFICATION_EXPERIMENT_ID",
             SOURCE_CLASSIFICATION_EXP_ID,
+        ),
+    )
+    parser.add_argument(
+        "--source-classification-results-csv",
+        type=Path,
+        help=(
+            "read historical classification candidates from an exported MLflow "
+            "CSV instead of the source classification experiment"
         ),
     )
     parser.add_argument(
