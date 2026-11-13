@@ -18,6 +18,7 @@ from evaluate import (
     _candidate_from_classification_results_row,
     _get_finished_run,
     _load_subset_frame,
+    _log_validation_artifacts,
     calculate_metrics,
     data_augmentation_for,
     data_augmentation_source_for,
@@ -616,6 +617,20 @@ def test_validation_reuses_matching_destination_run(tmp_path: Path):
     predict_mock.assert_called_once()
     assert first[0]["evaluation_run_id"] == second[0]["evaluation_run_id"]
     assert second[0]["validation_metric_source"] == "val_automl_cls"
+
+
+def test_artifact_failure_does_not_raise(tmp_path: Path):
+    artifact = tmp_path / "prediction.csv"
+    artifact.write_text("y_true,y_score\n0,0.1\n", encoding="utf-8")
+
+    class BrokenArtifactStore:
+        def log_artifact(self, *args, **kwargs):
+            raise RuntimeError("artifact store is unavailable")
+
+    status, error = _log_validation_artifacts(BrokenArtifactStore(), [artifact])
+
+    assert status == "failed"
+    assert "artifact store is unavailable" in error
 
 
 def test_test_evaluation_uses_test_dataset_and_logs_only_test_metrics(tmp_path: Path):
