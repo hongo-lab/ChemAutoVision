@@ -15,11 +15,13 @@ from evaluate import (
     RESULT_COLUMNS,
     SELECTED_COLUMNS,
     _candidate_from_mlflow_run,
+    _candidate_from_classification_results_row,
     _get_finished_run,
     _load_subset_frame,
     calculate_metrics,
     data_augmentation_for,
     data_augmentation_source_for,
+    discover_candidates,
     main,
     run_selection,
     run_test,
@@ -147,6 +149,7 @@ def evaluation_args(results_dir: Path):
         overwrite=False,
         tracking_uri="unused",
         source_classification_experiment_id="classification-experiment",
+        source_classification_results_csv=None,
         source_regression_experiment_id="regression-experiment",
         destination_experiment_name="val_automl_cls",
         allow_incomplete_groups=False,
@@ -334,6 +337,70 @@ def test_mutagenicity_training_run_is_classification_candidate(tmp_path: Path):
     assert result is not None
     assert result.task_type == "classification"
     assert result.dataset_name == "Mutagenicity"
+
+
+def test_mutagenicity_candidate_can_be_loaded_from_results_csv(tmp_path: Path):
+    model = tmp_path / "models" / "mutagenicity.h5"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    source_path = tmp_path / "automl_cls_results.csv"
+    row = {
+        "Status": "FINISHED",
+        "Run ID": "historical-run",
+        "model_name": "autokeras",
+        "target": "Mutagenicity",
+        "class_weight": "0:1.1, 1:0.9",
+        "seed": "42",
+        "batch_size": "8",
+        "model_path": str(model),
+        "execute_data_aug": "True",
+    }
+
+    result = _candidate_from_classification_results_row(
+        row, source_path, repo_root=tmp_path
+    )
+
+    assert result is not None
+    assert result.source_type == "classification_results_csv"
+    assert result.model_path == model.resolve()
+    assert result.source_params["class_weight"] == "0:1.1, 1:0.9"
+    assert result.source_tags["execute_data_aug"] == "True"
+
+
+def test_csv_candidate_discovery_does_not_require_source_experiment(tmp_path: Path):
+    rows = []
+    for batch_size in (8, 16, 32, 64):
+        model = tmp_path / "models" / f"mutagenicity-bs{batch_size}.h5"
+        model.parent.mkdir(exist_ok=True)
+        model.write_bytes(b"model")
+        rows.append(
+            {
+                "Status": "FINISHED",
+                "Run ID": f"historical-{batch_size}",
+                "model_name": "autokeras",
+                "target": "Mutagenicity",
+                "class_weight": "0:1.1, 1:0.9",
+                "seed": "42",
+                "batch_size": str(batch_size),
+                "model_path": str(model),
+                "execute_data_aug": "True",
+            }
+        )
+    source_path = tmp_path / "automl_cls_results.csv"
+    pd.DataFrame(rows).to_csv(source_path, index=False)
+    args = evaluation_args(tmp_path / "results")
+    args.source_classification_results_csv = source_path
+    args.task_name = ["Mutagenicity"]
+    args.family = ["chem_autovision"]
+    args.split_type = ["random"]
+    args.training_seed = [42]
+    fake_mlflow = FakeMlflow()
+
+    with patch.object(evaluate, "_set_tracking_uri", return_value=fake_mlflow):
+        candidates = discover_candidates(args)
+
+    assert [item.batch_size for item in candidates] == [8, 16, 32, 64]
+    assert all(item.source_type == "classification_results_csv" for item in candidates)
 
 
 def test_qm9_mlflow_run_uses_shared_dataset_and_selected_target(tmp_path: Path):
