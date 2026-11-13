@@ -53,7 +53,8 @@ DATA_PATHS = {
     "hERG": "../data/hERG_img.pkl",
     "BBBP": "../data/BBBP_img.pkl",
     "P-gp": "../data/P-gp_img.pkl",
-    "CYP3A4": "../data/CYP3A4_img.pkl"
+    "CYP3A4": "../data/CYP3A4_img.pkl",
+    "Mutagenicity": "../data/Mutagenicity_img.pkl",
 }
 AK_SERCH_MODEL = None
 
@@ -158,7 +159,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    set_seeds(99)
+    set_seeds(args.seed)
 
     task_name = args.task_name
     batch_size = int(args.batch_size) if args.batch_size else None 
