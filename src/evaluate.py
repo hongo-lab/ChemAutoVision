@@ -1145,6 +1145,27 @@ def _destination_validation_runs(mlflow: Any, experiment_id: str) -> dict[str, A
     return found
 
 
+def _log_validation_artifacts(
+    mlflow: Any, artifact_paths: Sequence[Path]
+) -> tuple[str, str]:
+    """Log optional artifacts without invalidating an otherwise valid evaluation."""
+
+    errors: list[str] = []
+    for artifact_path in artifact_paths:
+        try:
+            mlflow.log_artifact(str(artifact_path), artifact_path="validation")
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    if errors:
+        message = " | ".join(errors)
+        print(
+            "WARNING: validation metrics were saved, but MLflow artifact logging "
+            f"failed: {message}"
+        )
+        return "failed", message[:1000]
+    return "succeeded", ""
+
+
 def _source_run_for_candidate(
     candidate: Candidate, source_runs: Mapping[str, Any]
 ) -> Any:
@@ -1313,8 +1334,17 @@ def run_validation(
                 mlflow.log_params(_validation_run_params(candidate, source_run))
                 mlflow.log_metrics(to_log)
                 mlflow.set_tags(_nonempty(tags))
-                for artifact_path in artifact_paths:
-                    mlflow.log_artifact(str(artifact_path), artifact_path="validation")
+                artifact_status, artifact_error = _log_validation_artifacts(
+                    mlflow, artifact_paths
+                )
+                mlflow.set_tags(
+                    _nonempty(
+                        {
+                            "validation_artifact_log_status": artifact_status,
+                            "validation_artifact_log_error": artifact_error,
+                        }
+                    )
+                )
                 evaluation_run_id = str(evaluation_run.info.run_id)
             base.update(
                 {
