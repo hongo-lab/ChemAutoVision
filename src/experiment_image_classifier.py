@@ -1,8 +1,10 @@
 import argparse
 import gc
+import json
 import time
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 
 import autokeras as ak
 import numpy as np
@@ -23,6 +25,10 @@ from keras_tuner import Objective
 from keras_tuner.tuners import BayesianOptimization
 
 from data.images import create_cls_image_data
+from data.label_utils import (
+    DERIVED_CLASSIFICATION_DIRECTIONS,
+    LABEL_SCHEMES,
+)
 from data.objectives import calc_weights_for_binary
 from metrics.classifier_metrics import create_roc_curve
 from modeling.modeling import (
@@ -41,6 +47,7 @@ from recording.record_mlflow import record_exp_result
 from settings import IMG_SIZE
 from utils.split import (
     BALANCED_SCAFFOLD_SPLIT_TYPE,
+    make_dataset_pickle_path,
     make_split_prefix,
     split_method_name,
 )
@@ -156,6 +163,12 @@ if __name__ == "__main__":
         default=None,
         help="seed for balanced scaffold assignment (required for balanced_scaffold)",
     )
+    parser.add_argument(
+        "--label_scheme",
+        choices=LABEL_SCHEMES,
+        default=None,
+        help="derived classification label scheme (FreeSolv, ESOL, and Lipo)",
+    )
 
     args = parser.parse_args()
 
@@ -170,9 +183,16 @@ if __name__ == "__main__":
     selected_gpu_names = [gpu_names[i] for i in selected_gpu_indices]
     print(selected_gpu_names)
     
-    if task_name not in DATA_PATHS:
-        raise ValueError(f"Invalid task name: {task_name}")
-    data_path = DATA_PATHS[task_name]
+    is_derived_task = task_name in DERIVED_CLASSIFICATION_DIRECTIONS
+    if is_derived_task and args.label_scheme is None:
+        parser.error(f"--label_scheme is required for derived task {task_name}")
+    if not is_derived_task and args.label_scheme is not None:
+        parser.error(
+            "--label_scheme is only supported for FreeSolv, ESOL, and Lipo"
+        )
+    if not is_derived_task and task_name not in DATA_PATHS:
+        parser.error(f"Invalid task name: {task_name}")
+
     split_prefix = make_split_prefix(args.split_type, args.split_seed)
     split_method = split_method_name(args.split_type)
     split_run_name = (
@@ -180,8 +200,29 @@ if __name__ == "__main__":
         if args.split_type == BALANCED_SCAFFOLD_SPLIT_TYPE
         else split_method
     )
+    if args.label_scheme is not None:
+        split_run_name = f"{split_run_name}_{args.label_scheme}"
     data_aug_suffix = "" if args.execute_data_aug else "_noaug"
-    data_path = data_path.replace("../data/", f"../data/{split_prefix}")
+    if is_derived_task:
+        data_path = str(
+            make_dataset_pickle_path(
+                "../data",
+                task_name,
+                args.split_type,
+                args.split_seed,
+                args.label_scheme,
+            )
+        )
+    else:
+        data_path = DATA_PATHS[task_name].replace(
+            "../data/", f"../data/{split_prefix}"
+        )
+    label_metadata = {}
+    if args.label_scheme is not None:
+        metadata_path = Path(data_path).with_suffix(".metadata.json")
+        if not metadata_path.is_file():
+            parser.error(f"label metadata not found: {metadata_path}")
+        label_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
     train_ds, val_ds, _ = create_cls_image_data(
         data_path,
@@ -356,6 +397,12 @@ if __name__ == "__main__":
                 else (best_hp.values.get("lr", None) if best_hp is not None else lr)
             ),
             "seed": args.seed,
+            "label_scheme": args.label_scheme,
+            "threshold_fit_group": label_metadata.get("fit_group"),
+            "lower_quantile": label_metadata.get("lower_quantile"),
+            "upper_quantile": label_metadata.get("upper_quantile"),
+            "lower_threshold": label_metadata.get("lower_threshold"),
+            "upper_threshold": label_metadata.get("upper_threshold"),
         },
         # tags
         {

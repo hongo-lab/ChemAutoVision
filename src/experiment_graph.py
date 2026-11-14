@@ -1,7 +1,9 @@
 import argparse
 import gc
+import json
 import time
 from functools import partial
+from pathlib import Path
 
 import chemprop.hyperparameter_optimization as chemprop_hyperopt_module
 from chemprop.train import make_predictions
@@ -29,6 +31,10 @@ import torch
 from utils.utils import list_gpu_names
 import os
 from data.objectives import calc_weights_for_binary
+from data.label_utils import (
+    DERIVED_CLASSIFICATION_DIRECTIONS,
+    LABEL_SCHEMES,
+)
 from data.dataset_registry import (
     dataset_name_for_task,
     target_column_for_task,
@@ -44,6 +50,7 @@ from utils.atom_descriptor_metadata import (
 )
 from utils.split import (
     BALANCED_SCAFFOLD_SPLIT_TYPE,
+    make_dataset_pickle_path,
     make_split_csv_paths,
     split_method_name,
 )
@@ -85,6 +92,12 @@ if __name__ == "__main__":
         default=None,
         help="seed for balanced scaffold assignment (required for balanced_scaffold)",
     )
+    parser.add_argument(
+        "--label_scheme",
+        choices=LABEL_SCHEMES,
+        default=None,
+        help="derived classification label scheme (FreeSolv, ESOL, and Lipo)",
+    )
     parser.add_argument("--atom_descriptors_path", type=str, default=None,
                         help="train 用の原子特徴量 pkl パス（generate_cam_graph_features.py の出力）")
     parser.add_argument("--atom_descriptors", type=str, default="feature",
@@ -109,6 +122,19 @@ if __name__ == "__main__":
     )
 
     task_name = args.task_name
+    is_derived_task = task_name in DERIVED_CLASSIFICATION_DIRECTIONS
+    if args.label_scheme is not None and args.dataset_type != "classification":
+        parser.error("--label_scheme requires --dataset_type classification")
+    if (
+        is_derived_task
+        and args.dataset_type == "classification"
+        and args.label_scheme is None
+    ):
+        parser.error(f"--label_scheme is required for derived task {task_name}")
+    if not is_derived_task and args.label_scheme is not None:
+        parser.error(
+            "--label_scheme is only supported for FreeSolv, ESOL, and Lipo"
+        )
     legacy_target_name = (
         task_name[2:] if task_name[:2] in ("t_", "q_") else task_name
     )
@@ -126,7 +152,11 @@ if __name__ == "__main__":
         run_target = task_name
     try:
         split_csv_paths = make_split_csv_paths(
-            "../data", dataset_name, args.split_type, args.split_seed
+            "../data",
+            dataset_name,
+            args.split_type,
+            args.split_seed,
+            args.label_scheme,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -140,6 +170,21 @@ if __name__ == "__main__":
         if args.split_type == BALANCED_SCAFFOLD_SPLIT_TYPE
         else split_method
     )
+    if args.label_scheme is not None:
+        split_run_name = f"{split_run_name}_{args.label_scheme}"
+    label_metadata = {}
+    if args.label_scheme is not None:
+        dataset_path = make_dataset_pickle_path(
+            "../data",
+            dataset_name,
+            args.split_type,
+            args.split_seed,
+            args.label_scheme,
+        )
+        metadata_path = Path(dataset_path).with_suffix(".metadata.json")
+        if not metadata_path.is_file():
+            parser.error(f"label metadata not found: {metadata_path}")
+        label_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     train_data_path = str(split_csv_paths["train"])
     val_data_path = str(split_csv_paths["val"])
 
@@ -411,6 +456,12 @@ if __name__ == "__main__":
             "split_seed": args.split_seed
             if args.split_type == BALANCED_SCAFFOLD_SPLIT_TYPE
             else None,
+            "label_scheme": args.label_scheme,
+            "threshold_fit_group": label_metadata.get("fit_group"),
+            "lower_quantile": label_metadata.get("lower_quantile"),
+            "upper_quantile": label_metadata.get("upper_quantile"),
+            "lower_threshold": label_metadata.get("lower_threshold"),
+            "upper_threshold": label_metadata.get("upper_threshold"),
             "train_smiles_hash": atom_desc_metadata.get("train", {}).get("ordered_smiles_sha256"),
             "val_smiles_hash": atom_desc_metadata.get("val", {}).get("ordered_smiles_sha256"),
         },

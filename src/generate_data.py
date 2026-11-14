@@ -22,9 +22,19 @@ from data.dataset_registry import (
     dataset_name_for_task,
     target_columns_for_generation,
 )
+from data.label_utils import (
+    DERIVED_CLASSIFICATION_DIRECTIONS,
+    LABEL_SCHEMES,
+    QuantileThresholds,
+    build_quantile_classification,
+)
 from data.qm9 import load_qm9_dataframe
 from settings import IMG_SIZE, IS_DOWNSCALE_BEFORE_DAUG
-from utils.split import BALANCED_SCAFFOLD_SPLIT_TYPE, make_split_prefix
+from utils.split import (
+    BALANCED_SCAFFOLD_SPLIT_TYPE,
+    label_scheme_artifact_prefix,
+    make_split_prefix,
+)
 
 RAW_HERG_CSV_PATH = "../data/raw/hERG_inhibition/hERG.csv"
 RAW_CYP3A4_CSV_PATH = "../data/raw/CYP3A4_inhibition/CYP3A4.csv"
@@ -305,6 +315,32 @@ def _validate_split(df: pd.DataFrame, task_name: str) -> None:
                 )
 
 
+def _validate_derived_classification_split(
+    df: pd.DataFrame, task_name: str
+) -> None:
+    """Require evaluable binary classes after excluding the middle band."""
+    valid_labels = set(df[task_name].dropna().unique())
+    if not valid_labels.issubset({-1, 0, 1}):
+        raise ValueError(
+            f"{task_name} derived labels must be -1, 0, or 1; "
+            f"found {sorted(valid_labels)}"
+        )
+
+    class_counts = pd.crosstab(df["group"], df[task_name])
+    print(f"Derived class distribution (-1 is excluded):\n{class_counts}")
+    for group in ("train", "val", "test"):
+        labels = set(
+            df.loc[
+                (df["group"] == group) & (df[task_name] != -1), task_name
+            ].unique()
+        )
+        if labels != {0, 1}:
+            raise ValueError(
+                f"{task_name} {group} fold must contain derived classes 0 and 1; "
+                f"found {sorted(labels)}"
+            )
+
+
 def _smi_to_canonical_smi(smiles: str) -> str:
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -380,6 +416,52 @@ def _write_qm9_metadata(
     print(f"Saved: {metadata_path}")
 
 
+def _write_label_metadata(
+    df: pd.DataFrame,
+    output_path: str,
+    task_name: str,
+    label_scheme: str,
+    thresholds: QuantileThresholds,
+    split_type: str,
+    split_seed: int | None,
+) -> None:
+    counts: dict[str, dict[str, int]] = {}
+    for group in ("train", "val", "test"):
+        labels = df.loc[df["group"] == group, task_name]
+        counts[group] = {
+            "0": int((labels == 0).sum()),
+            "1": int((labels == 1).sum()),
+            "excluded": int((labels == -1).sum()),
+        }
+
+    metadata = {
+        "schema_version": 1,
+        "dataset": task_name,
+        "label_scheme": label_scheme,
+        "fit_group": "train",
+        "direction": thresholds.direction,
+        "lower_quantile": thresholds.lower_quantile,
+        "upper_quantile": thresholds.upper_quantile,
+        "lower_threshold": thresholds.lower,
+        "upper_threshold": thresholds.upper,
+        "boundary_inclusive": True,
+        "continuous_target_column": f"{task_name}_continuous",
+        "label_column": task_name,
+        "excluded_label": -1,
+        "split_type": split_type,
+        "split_seed": (
+            split_seed if split_type == BALANCED_SCAFFOLD_SPLIT_TYPE else 99
+        ),
+        "counts": counts,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata_path = Path(output_path).with_suffix(".metadata.json")
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"Saved: {metadata_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="generate data")
     parser.add_argument("--task_name", type=str, required=True, help="the task name")
@@ -406,11 +488,28 @@ def main() -> None:
         type=Path,
         help="override the raw input CSV path (supported for Mutagenicity)",
     )
+    parser.add_argument(
+        "--label_scheme",
+        choices=LABEL_SCHEMES,
+        default=None,
+        help=(
+            "derive binary labels from train-fold quantiles "
+            "(FreeSolv, ESOL, and Lipo only)"
+        ),
+    )
     args = parser.parse_args()
     task_name = args.task_name
     dataset_name = dataset_name_for_task(task_name)
     split_type = args.split_type
     split_seed = args.split_seed
+    label_scheme = args.label_scheme
+    if (
+        label_scheme is not None
+        and dataset_name not in DERIVED_CLASSIFICATION_DIRECTIONS
+    ):
+        parser.error(
+            "--label_scheme is only supported for FreeSolv, ESOL, and Lipo"
+        )
     # balanced scaffold splitの生成物は方式とseedをファイル名に含める。
     # random（デフォルト）では空文字なので従来の挙動を完全維持する。
     split_prefix = make_split_prefix(split_type, split_seed)
@@ -451,6 +550,35 @@ def main() -> None:
 
     df.to_pickle(output_path)
     _save_split_csvs(df, dataset_name, target_columns, "", split_prefix)
+    if label_scheme is not None:
+        classified_df, thresholds = build_quantile_classification(
+            df, dataset_name, label_scheme
+        )
+        _validate_derived_classification_split(classified_df, dataset_name)
+        label_prefix = label_scheme_artifact_prefix(label_scheme)
+        classification_output_path = (
+            f"../data/{split_prefix}{label_prefix}{dataset_name}_img.pkl"
+        )
+        classified_df.to_pickle(classification_output_path)
+        classification_csv_df = classified_df.loc[
+            classified_df[dataset_name].isin([0, 1])
+        ].copy()
+        _save_split_csvs(
+            classification_csv_df,
+            dataset_name,
+            (dataset_name, f"{dataset_name}_continuous"),
+            label_prefix.rstrip("_"),
+            split_prefix,
+        )
+        _write_label_metadata(
+            classified_df,
+            classification_output_path,
+            dataset_name,
+            label_scheme,
+            thresholds,
+            split_type,
+            split_seed,
+        )
     if dataset_name == "QM9":
         _write_qm9_metadata(
             df,
