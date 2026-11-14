@@ -81,6 +81,35 @@ The outputs include the scaffold method and seed so that they never overwrite ra
 | Split CSVs | `/chemAutoVision/data/{train,val,test}_[task_name]_img.csv` | `/chemAutoVision/data/{train,val,test}_balanced_scaffold_seed1_[task_name]_img.csv` |
 | Images | `/chemAutoVision/data/images/[task_name]` | `/chemAutoVision/data/images/balanced_scaffold_seed1_[task_name]` |
 
+## Derived quantile classification
+
+FreeSolv, ESOL, and Lipo can also be generated as binary classification tasks.
+The molecules are split first, thresholds are fitted from the training targets
+only, and those fixed thresholds are then applied to the validation and test
+folds. The middle band is labeled `-1` and excluded by the training loaders.
+
+```bash
+# Lower/upper thirds
+python3 generate_data.py --task_name FreeSolv --label_scheme tertile_extremes
+
+# Lower/upper quarters
+python3 generate_data.py --task_name FreeSolv --label_scheme quartile_extremes
+```
+
+Tertile artifacts use `cls_t_` and quartile artifacts use `cls_q_`, for example
+`cls_t_FreeSolv_img.pkl` and `train_cls_t_FreeSolv_img.csv`. Each pickle has a
+matching `.metadata.json` file containing the fitted thresholds and fold class
+counts. Pass the same `--label_scheme` to classification training:
+
+```bash
+python3 experiment_image_classifier.py [other options] \
+    --task_name FreeSolv --label_scheme tertile_extremes
+
+python3 experiment_graph.py [other options] \
+    --task_name FreeSolv --dataset_type classification \
+    --label_scheme tertile_extremes
+```
+
 The images are written to a separate directory because the legacy dataset image
 file names are derived from the post-split row index, which differs between the
 two strategies. QM9 uses a canonical-SMILES hash as the image file name so

@@ -42,7 +42,10 @@ from data.dataset_registry import (
     task_name_from_dataset_target,
 )
 from settings import IMG_SIZE
-from utils.split import BALANCED_SCAFFOLD_SPLIT_TYPE, make_split_prefix
+from utils.split import (
+    BALANCED_SCAFFOLD_SPLIT_TYPE,
+    make_dataset_pickle_path,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +91,7 @@ RESULT_COLUMNS = (
     "family",
     "model_type",
     "task_type",
+    "label_scheme",
     "dataset",
     "target",
     "split_type",
@@ -122,6 +126,7 @@ TEST_RESULT_COLUMNS = (
     "family",
     "model_type",
     "task_type",
+    "label_scheme",
     "dataset",
     "target",
     "split_type",
@@ -168,6 +173,7 @@ class Candidate:
     run_id: str
     model_path: Path
     dataset: str = ""
+    label_scheme: str | None = None
     source_type: str = "mlflow"
     source_params: Mapping[str, str] = field(default_factory=dict)
     source_tags: Mapping[str, str] = field(default_factory=dict)
@@ -193,6 +199,7 @@ class Candidate:
             self.family,
             self.dataset_name,
             self.target,
+            self.label_scheme or "none",
             self.split_type,
             str(self.split_seed or "none"),
             str(self.training_seed),
@@ -208,6 +215,7 @@ class Candidate:
                 self.family,
                 self.dataset_name,
                 self.target,
+                self.label_scheme or "none",
                 self.split_type,
                 str(self.split_seed or "none"),
                 str(self.training_seed),
@@ -321,10 +329,14 @@ def _candidate_from_mlflow_run(
 
     target = _clean(tags.get("target"))
     dataset = _clean(tags.get("dataset")) or target
-    try:
-        task_type = task_type_for_target(target, dataset)
-    except ValueError:
-        return None
+    label_scheme = _clean(params.get("label_scheme")) or None
+    if label_scheme:
+        task_type = "classification"
+    else:
+        try:
+            task_type = task_type_for_target(target, dataset)
+        except ValueError:
+            return None
     if task_type == "classification" and not _clean(params.get("class_weight")):
         return None
 
@@ -365,6 +377,7 @@ def _candidate_from_mlflow_run(
         run_id=str(run.info.run_id),
         model_path=model_path,
         dataset=dataset,
+        label_scheme=label_scheme,
     )
 
 
@@ -393,10 +406,14 @@ def _candidate_from_classification_results_row(
 
     target = _clean(row.get("target"))
     dataset = _clean(row.get("dataset")) or target
-    try:
-        task_type = task_type_for_target(target, dataset)
-    except ValueError:
-        return None
+    label_scheme = _clean(row.get("label_scheme")) or None
+    if label_scheme:
+        task_type = "classification"
+    else:
+        try:
+            task_type = task_type_for_target(target, dataset)
+        except ValueError:
+            return None
     if task_type != "classification" or not _clean(row.get("class_weight")):
         return None
 
@@ -449,6 +466,7 @@ def _candidate_from_classification_results_row(
         "daug_rotate_angles",
         "daug_rotation_factor",
         "daug_zoom_factor",
+        "label_scheme",
     )
     source_params = {
         name: _clean(row.get(name))
@@ -481,6 +499,7 @@ def _candidate_from_classification_results_row(
         run_id=run_id,
         model_path=model_path,
         dataset=dataset,
+        label_scheme=label_scheme,
         source_type="classification_results_csv",
         source_params=source_params,
         source_tags=source_tags,
@@ -792,8 +811,13 @@ def _subset_sha256(frame: pd.DataFrame, target: str) -> str:
 
 
 def _dataset_pickle_path(candidate: Candidate) -> Path:
-    prefix = make_split_prefix(candidate.split_type, candidate.split_seed)
-    return REPO_ROOT / "data" / f"{prefix}{candidate.dataset_name}_img.pkl"
+    return make_dataset_pickle_path(
+        REPO_ROOT / "data",
+        candidate.dataset_name,
+        candidate.split_type,
+        candidate.split_seed,
+        candidate.label_scheme,
+    )
 
 
 def _load_subset_frame(candidate: Candidate, subset: str) -> tuple[pd.DataFrame, Path]:
@@ -1107,6 +1131,7 @@ def _validation_run_params(candidate: Candidate, source_run: Any) -> dict[str, o
         "batch_size": candidate.batch_size,
         "split_type": candidate.split_type,
         "split_seed": candidate.split_seed if candidate.split_seed is not None else "",
+        "label_scheme": candidate.label_scheme or "",
         "evaluation_split": "val",
         "classification_threshold": (
             0.5 if candidate.task_type == "classification" else ""
@@ -1214,6 +1239,7 @@ def run_validation(
             "family": candidate.family,
             "model_type": candidate.model_type,
             "task_type": candidate.task_type,
+            "label_scheme": candidate.label_scheme or "",
             "dataset": candidate.dataset_name,
             "target": candidate.target,
             "split_type": candidate.split_type,
@@ -1443,6 +1469,7 @@ def _candidate_from_result_row(row: Mapping[str, str]) -> Candidate:
         run_id=row.get("run_id", ""),
         model_path=Path(row["model_path"]),
         dataset=row.get("dataset", ""),
+        label_scheme=row.get("label_scheme") or None,
     )
 
 

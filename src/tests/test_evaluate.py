@@ -433,6 +433,39 @@ def test_qm9_mlflow_run_uses_shared_dataset_and_selected_target(tmp_path: Path):
     assert evaluate._dataset_pickle_path(result).name == "QM9_img.pkl"
 
 
+def test_quantile_label_scheme_makes_regression_target_a_classification_candidate(
+    tmp_path: Path,
+):
+    model = tmp_path / "model.h5"
+    model.write_text("model", encoding="utf-8")
+    run = SimpleNamespace(
+        info=SimpleNamespace(run_id="freesolv-cls", status="FINISHED"),
+        data=SimpleNamespace(
+            params={
+                "seed": "42",
+                "batch_size": "8",
+                "class_weight": "0:1, 1:1",
+                "label_scheme": "tertile_extremes",
+            },
+            tags={
+                "model_name": "autokeras",
+                "target": "FreeSolv",
+                "data_split": "random",
+                "model_path": str(model),
+                "execute_data_aug": "False",
+            },
+            metrics={},
+        ),
+    )
+
+    result = _candidate_from_mlflow_run(run, repo_root=tmp_path)
+
+    assert result is not None
+    assert result.task_type == "classification"
+    assert result.label_scheme == "tertile_extremes"
+    assert evaluate._dataset_pickle_path(result).name == "cls_t_FreeSolv_img.pkl"
+
+
 def test_non_augmented_resnet_run_is_out_of_scope(tmp_path: Path):
     run = SimpleNamespace(
         info=SimpleNamespace(run_id="run", status="FINISHED"),
