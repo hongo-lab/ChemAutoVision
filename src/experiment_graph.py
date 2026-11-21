@@ -103,12 +103,6 @@ if __name__ == "__main__":
     parser.add_argument("--atom_descriptors", type=str, default="feature",
                         choices=["feature", "descriptor"],
                         help="原子特徴量の注入方法: feature=メッセージパッシング前, descriptor=readout後 (デフォルト: feature)")
-    parser.add_argument("--radius", type=int, default=None,
-                        help="CAM原子特徴量生成時のradius [px]。指定すると atom_descriptors_path 内の"
-                            "_atom_desc_ を _r{radius}_{aggregation}_atom_desc_ に置換して対応する pkl を使用する")
-    parser.add_argument("--aggregation", type=str, default="mean",
-                        choices=["mean", "max", "gaussian"],
-                        help="CAM集計方法。--radius と合わせて使用（デフォルト: mean）")
     args = parser.parse_args()
 
     if args.patience < 0:
@@ -205,10 +199,6 @@ if __name__ == "__main__":
     atom_desc_val_path = None
     atom_desc_metadata = {}
     if atom_desc_train_path is not None:
-        if args.radius is not None:
-            atom_desc_train_path = atom_desc_train_path.replace(
-                "_atom_desc_", f"_r{args.radius}_{args.aggregation}_atom_desc_"
-            )
         if not atom_desc_train_path.endswith("_train.pkl"):
             parser.error("--atom_descriptors_path must end with _train.pkl")
         _base = atom_desc_train_path.removesuffix("_train.pkl")
@@ -449,8 +439,8 @@ if __name__ == "__main__":
             "features_size": None if not hasattr(args, 'features_size') else args.features_size,
             "atom_descriptors_path": atom_desc_train_path,
             "atom_descriptors": args.atom_descriptors if atom_desc_train_path is not None else None,
-            "cam_aggregation": args.aggregation if atom_desc_train_path is not None else None,
-            "cam_radius": args.radius if atom_desc_train_path is not None else None,
+            "cam_aggregation": atom_desc_metadata.get("train", {}).get("aggregation"),
+            "cam_radius": atom_desc_metadata.get("train", {}).get("radius"),
             "seed": args.seed,
             "split_type": args.split_type,
             "split_seed": args.split_seed

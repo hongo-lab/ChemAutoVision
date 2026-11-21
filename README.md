@@ -132,6 +132,50 @@ split method and seed, subset, CSV name, molecule count, ordered-SMILES hash,
 and descriptor-file hash before hyperparameter optimization starts. Missing or
 legacy metadata is rejected rather than allowing an unverified experiment.
 
+## CAM heatmaps and graph atom features
+
+GradCAM, ScoreCAM, and LayerCAM heatmaps can be generated for an image model.
+The source model run ID and explained class are part of the output path, so CAMs
+from different models or targets cannot overwrite one another:
+
+```text
+data/images/{dataset}/cams/{source_run_id}/{cam_method}/{target_class}/{image_key}.npy
+```
+
+For example, from the `src` directory:
+
+```bash
+python generate_cam_heatmaps.py \
+  --task_name BBBP \
+  --model_path ../models/example.h5 \
+  --source_run_id SOURCE_MLFLOW_RUN_ID \
+  --model_family autokeras \
+  --task_type classification \
+  --cam_method gradcam \
+  --target_class positive
+```
+
+`--target_class` selects the score explained by CAM: `positive`, `negative`,
+`predicted`, or `ground_truth`.  CAM-derived graph features intentionally reject
+`ground_truth`, because selecting an explanation target from the true label
+would leak the target into the graph-model input.
+
+Generate strict Chemprop per-atom features after all requested heatmaps exist:
+
+```bash
+python generate_cam_graph_features.py \
+  --task_name BBBP \
+  --source_run_id SOURCE_MLFLOW_RUN_ID \
+  --task_type classification \
+  --cam_methods gradcam scorecam layercam \
+  --target_class positive
+```
+
+Missing, non-finite, incorrectly shaped, or constant heatmaps are errors.  They
+are never zero-filled.  Descriptor files are written only after all three data
+subsets validate, and each output has the required `*.meta.json` provenance
+sidecar.
+
 The datasets for CYP3A4 inhibition, hERG inhibition, and P-gp substrate prediction were obtained from [Han et al.](https://doi.org/10.1021/acs.jcim.4c02122). In the original study, the files labeled `valid` were used as external validation datasets. Therefore, these external datasets were excluded from the data used for model training and evaluation in this study. For each task, the corresponding `train` and `test` files were concatenated and used as the source dataset.
 
 # Model training

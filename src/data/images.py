@@ -1,13 +1,14 @@
 import logging
 import math
 import random
+import io
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from PIL import Image, ImageFilter, ImageOps
 from rdkit import Chem
-from rdkit.Chem import Draw
+from rdkit.Chem.Draw import rdMolDraw2D
 from tensorflow.keras.utils import img_to_array
 
 from data.dataset_registry import target_column_for_task
@@ -16,13 +17,40 @@ from settings import IMG_SIZE, IS_DOWNSCALE_BEFORE_DAUG
 
 def smi_to_img(smiles: str, img_size: tuple[int, int]) -> Image:
     try:
-        img = Draw.MolToImage(
-            Chem.MolFromSmiles(smiles), size=(img_size[0], img_size[1])
-        )
-        return img
+        image, _ = render_molecule_with_coords(smiles, img_size)
+        return image
     except Exception as e:
         logging.error((f"Error processing SMILES to img'{smiles}': {e}"))
         raise
+
+
+def render_molecule_with_coords(
+    smiles: str,
+    img_size: tuple[int, int],
+) -> tuple[Image.Image, dict[int, tuple[float, float]]]:
+    """Render a molecule and return atom coordinates in the same canvas.
+
+    This is the coordinate-bearing counterpart of :func:`smi_to_img`.  CAM
+    aggregation uses it with the same downscaled size and padding policy as
+    ``generate_data.py`` so atom indices align with the saved molecular image.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"invalid SMILES: {smiles!r}")
+    width, height = img_size
+    drawer = rdMolDraw2D.MolDraw2DCairo(width, height)
+    drawer.DrawMolecule(mol)
+    drawer.FinishDrawing()
+    coords = {
+        atom_index: (
+            float(drawer.GetDrawCoords(atom_index).x),
+            float(drawer.GetDrawCoords(atom_index).y),
+        )
+        for atom_index in range(mol.GetNumAtoms())
+    }
+    image = Image.open(io.BytesIO(drawer.GetDrawingText())).convert("RGB")
+    return image, coords
+
 
 def create_cls_image_data(
     data_path: str,
@@ -30,7 +58,6 @@ def create_cls_image_data(
     test_size: int,
     img_size: tuple[int, int],
 ) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
-
     _df = pd.read_pickle(data_path)
     smiles_column = "smiles"
 
@@ -109,5 +136,3 @@ def preprocess_image(file_path: str) -> tf.Tensor:
     image = tf.cast(image, tf.float32)
 
     return image
-
-
